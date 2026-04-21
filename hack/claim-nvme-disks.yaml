@@ -1,0 +1,30 @@
+---
+apiVersion: hwameistor.io/v1alpha1
+kind: LocalDiskClaim
+metadata:
+  name: nvme-3kykrp2
+spec:
+  nodeName: 3kykrp2
+  owner: local-storage
+  description:
+    diskType: NVMe
+---
+apiVersion: hwameistor.io/v1alpha1
+kind: LocalDiskClaim
+metadata:
+  name: nvme-3kylrp2
+spec:
+  nodeName: 3kylrp2
+  owner: local-storage
+  description:
+    diskType: NVMe
+---
+apiVersion: hwameistor.io/v1alpha1
+kind: LocalDiskClaim
+metadata:
+  name: nvme-dxrhhq2
+spec:
+  nodeName: dxrhhq2
+  owner: local-storage
+  description:
+    diskType: NVMe

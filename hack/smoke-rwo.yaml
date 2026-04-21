@@ -1,0 +1,53 @@
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: hwameistor-storage-lvm-nvme
+provisioner: lvm.hwameistor.io
+parameters:
+  poolClass: NVMe
+  poolType: REGULAR
+  volumeKind: LVM
+  replicaNumber: "1"
+  csi.storage.k8s.io/fstype: xfs
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: smoke-rwo
+  namespace: default
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: hwameistor-storage-lvm-nvme
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: smoke-rwo
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+  - name: writer
+    image: alpine:3.20
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      set -e
+      echo "hello from hwameistor on central $(date -u +%FT%TZ)" > /data/hello.txt
+      cat /data/hello.txt
+      ls -la /data/
+      df -h /data
+      sleep 3
+    volumeMounts:
+    - { name: data, mountPath: /data }
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: smoke-rwo

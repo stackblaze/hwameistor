@@ -1,0 +1,77 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wipe-nvme-pool
+  namespace: kube-system
+spec:
+  completions: 3
+  parallelism: 3
+  completionMode: Indexed
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      hostPID: true
+      hostNetwork: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+      - operator: Exists
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                job-name: wipe-nvme-pool
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: wipe
+        image: alpine:3.20
+        securityContext:
+          privileged: true
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          set -e
+          NODE=$(nsenter -t 1 -m hostname)
+          echo "=== node: $NODE ==="
+
+          # Safety: confirm nvme-pool exists and has only a thin-pool LV with 0% data
+          if ! nsenter -t 1 -m vgs nvme-pool >/dev/null 2>&1; then
+            echo "nvme-pool not present on $NODE; nothing to do"
+            exit 0
+          fi
+
+          echo "--- before wipe ---"
+          nsenter -t 1 -m lvs nvme-pool
+          nsenter -t 1 -m pvs -S vg_name=nvme-pool
+
+          # Refuse to wipe if any LV has non-zero data usage (paranoid; user confirmed empty)
+          USED=$(nsenter -t 1 -m lvs --noheadings -o data_percent nvme-pool 2>/dev/null | tr -d ' ' | grep -v '^0.00$' | grep -v '^$' || true)
+          if [ -n "$USED" ]; then
+            echo "ABORT: nvme-pool LVs have non-zero data usage: $USED"
+            exit 1
+          fi
+
+          # Remove the thin-pool LV first, then the VG, then each PV
+          echo "--- removing LVs ---"
+          nsenter -t 1 -m lvremove -f nvme-pool
+
+          echo "--- removing VG ---"
+          nsenter -t 1 -m vgremove -f nvme-pool
+
+          echo "--- removing PVs ---"
+          for dev in /dev/nvme0n1 /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1; do
+            if nsenter -t 1 -m pvs "$dev" >/dev/null 2>&1; then
+              echo "pvremove $dev"
+              nsenter -t 1 -m pvremove -f "$dev"
+            fi
+            # also wipe LVM label / any leftover signatures so HwameiStor sees a clean disk
+            echo "wipefs -a $dev"
+            nsenter -t 1 -m wipefs -a "$dev" || true
+          done
+
+          echo "--- after wipe ---"
+          nsenter -t 1 -m vgs 2>&1 || echo "(no VGs)"
+          nsenter -t 1 -m lsblk -o NAME,SIZE,TYPE,FSTYPE /dev/nvme0n1 /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1
+          echo "=== DONE: $NODE ==="

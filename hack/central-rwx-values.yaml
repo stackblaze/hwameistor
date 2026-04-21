@@ -1,0 +1,30 @@
+# Central-cluster Helm overrides to enable RWX with the stackblaze-built images.
+#
+# Usage (tag = git short SHA once the release workflow has pushed the images):
+#
+#   helm --kube-context=k8s-us-central upgrade hwameistor helm/hwameistor \
+#     -n hwameistor \
+#     --skip-crds \
+#     -f hack/central-rwx-values.yaml \
+#     --set-string localStorage.member.tag=<sha> \
+#     --set-string rwx.reactor.tag=<sha>
+
+# Point the local-storage DaemonSet at the stackblaze build (contains the
+# --enable-rwx flag wiring and the rwxpvc reconciler).
+global:
+  hwameistorImageRegistry: docker.io
+localStorage:
+  member:
+    imageRepository: stackblaze/hwameistor-local-storage
+    # tag: set via --set-string on the upgrade command
+
+rwx:
+  enabled: true
+  reactor:
+    imageRepository: stackblaze/hwameistor-local-storage-nfs-reactor
+    # tag: set via --set-string on the upgrade command
+  storageClass:
+    enabled: true
+    backingStorageClassName: hwameistor-storage-lvm-nvme
+    reclaimPolicy: Delete
+    allowVolumeExpansion: true

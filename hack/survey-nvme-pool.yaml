@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: survey-nvme-pool
+  namespace: kube-system
+spec:
+  completions: 3
+  parallelism: 3
+  completionMode: Indexed
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      hostPID: true
+      hostNetwork: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+      - operator: Exists
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                job-name: survey-nvme-pool
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: survey
+        image: alpine:3.20
+        securityContext:
+          privileged: true
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          apk add -q util-linux 2>/dev/null || true
+          echo "=== node: $(nsenter -t 1 -m hostname) ==="
+          echo "--- vgs ---"
+          nsenter -t 1 -m vgs 2>&1 || echo "(no VGs)"
+          echo "--- pvs ---"
+          nsenter -t 1 -m pvs 2>&1 || echo "(no PVs)"
+          echo "--- lvs ---"
+          nsenter -t 1 -m lvs 2>&1 || echo "(no LVs)"
+          echo "--- lsblk ---"
+          nsenter -t 1 -m lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT 2>&1
+          echo "=== END ==="

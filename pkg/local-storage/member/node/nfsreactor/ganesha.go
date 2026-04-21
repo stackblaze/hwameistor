@@ -2,19 +2,10 @@ package nfsreactor
 
 import (
 	"fmt"
+	"sync"
 
+	"github.com/godbus/dbus/v5"
 	log "github.com/sirupsen/logrus"
-	// TODO: add github.com/godbus/dbus/v5 to go.mod when wiring the build.
-	// Once added, replace the stub implementation below with real calls:
-	//
-	//   import "github.com/godbus/dbus/v5"
-	//
-	//   conn, err := dbus.Dial(addr)
-	//   _ = conn.Auth(nil); _ = conn.Hello()
-	//   obj := conn.Object("org.ganesha.nfsd", "/org/ganesha/nfsd/ExportMgr")
-	//   var status bool; var message string
-	//   err := obj.Call("org.ganesha.nfsd.exportmgr.AddExport", 0, path, config).
-	//           Store(&status, &message)
 )
 
 // DefaultExportConfigTemplate is the Ganesha EXPORT{} block written per-volume.
@@ -37,16 +28,15 @@ func RenderExportConfig(exportID uint16, path, pseudo string) string {
 
 // Ganesha DBus contract:
 //
-//   Bus name:  org.ganesha.nfsd
-//   Object:    /org/ganesha/nfsd/ExportMgr
-//   Interface: org.ganesha.nfsd.exportmgr
+//	Bus name:  org.ganesha.nfsd
+//	Object:    /org/ganesha/nfsd/ExportMgr
+//	Interface: org.ganesha.nfsd.exportmgr
 //
-//   AddExport(path string, config string) -> (status bool, message string)
-//   RemoveExport(exportID uint16)         -> (status bool, message string)
+//	AddExport(path string, config string) -> (status bool, message string)
+//	RemoveExport(exportID uint16)         -> (status bool, message string)
 const (
 	ganeshaBusName    = "org.ganesha.nfsd"
 	ganeshaObjectPath = "/org/ganesha/nfsd/ExportMgr"
-	ganeshaInterface  = "org.ganesha.nfsd.exportmgr"
 	ganeshaAddExport  = "org.ganesha.nfsd.exportmgr.AddExport"
 	ganeshaRemExport  = "org.ganesha.nfsd.exportmgr.RemoveExport"
 )
@@ -60,37 +50,97 @@ type GaneshaClient interface {
 // NewGaneshaDBusClient returns a GaneshaClient that talks to Ganesha over the
 // system DBus socket at addr (e.g. "unix:/run/dbus/system_bus_socket").
 //
-// NOTE: the concrete implementation below is a stub until godbus/dbus/v5 is
-// added to go.mod. It logs each call and returns nil so the reactor can be
-// exercised end-to-end in tests and dry runs. Callers should replace this
-// with the real implementation once the dependency is vendored.
+// The connection is established lazily on the first call and reconnected
+// automatically if it drops — Ganesha restarts leave us with a dead socket
+// and we need to survive that transparently.
 func NewGaneshaDBusClient(addr string) GaneshaClient {
-	return &stubGanesha{addr: addr}
+	return &dbusGanesha{addr: addr}
 }
 
-type stubGanesha struct {
+type dbusGanesha struct {
 	addr string
+
+	mu   sync.Mutex
+	conn *dbus.Conn
 }
 
-func (g *stubGanesha) AddExport(exportID uint16, path, config string) error {
+// connect establishes (or reuses) a DBus connection to Ganesha. The caller
+// must hold g.mu.
+func (g *dbusGanesha) connect() (*dbus.Conn, error) {
+	if g.conn != nil && g.conn.Connected() {
+		return g.conn, nil
+	}
+	// Close a stale connection if any.
+	if g.conn != nil {
+		_ = g.conn.Close()
+		g.conn = nil
+	}
+
+	conn, err := dbus.Dial(g.addr)
+	if err != nil {
+		return nil, fmt.Errorf("dbus dial %q: %w", g.addr, err)
+	}
+	if err := conn.Auth(nil); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("dbus auth: %w", err)
+	}
+	if err := conn.Hello(); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("dbus hello: %w", err)
+	}
+	g.conn = conn
+	return conn, nil
+}
+
+// call wraps a Ganesha DBus method call. Ganesha's (status bool, message
+// string) return tuple is the de-facto contract: status=false signals a
+// Ganesha-side failure and we surface the message.
+func (g *dbusGanesha) call(method string, args ...interface{}) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	conn, err := g.connect()
+	if err != nil {
+		return err
+	}
+	obj := conn.Object(ganeshaBusName, dbus.ObjectPath(ganeshaObjectPath))
+
+	var status bool
+	var message string
+	call := obj.Call(method, 0, args...)
+	if call.Err != nil {
+		// If the transport died, drop the cached connection so the next
+		// call reconnects. Typical during Ganesha restarts.
+		if g.conn != nil && !g.conn.Connected() {
+			_ = g.conn.Close()
+			g.conn = nil
+		}
+		return fmt.Errorf("%s: %w", method, call.Err)
+	}
+	if err := call.Store(&status, &message); err != nil {
+		return fmt.Errorf("%s: decode reply: %w", method, err)
+	}
+	if !status {
+		return fmt.Errorf("%s rejected: %s", method, message)
+	}
+	return nil
+}
+
+func (g *dbusGanesha) AddExport(exportID uint16, path, config string) error {
 	log.WithFields(log.Fields{
 		"addr":     g.addr,
 		"exportID": exportID,
 		"path":     path,
-		"bus":      ganeshaBusName,
-		"object":   ganeshaObjectPath,
-		"iface":    ganeshaInterface,
-		"method":   ganeshaAddExport,
-	}).Warn("ganesha DBus stub: AddExport called (add godbus/dbus/v5 to go.mod to enable)")
-	_ = config
-	return nil
+	}).Debug("ganesha AddExport")
+	// Ganesha AddExport signature is (path string, config string).
+	return g.call(ganeshaAddExport, path, config)
 }
 
-func (g *stubGanesha) RemoveExport(exportID uint16) error {
+func (g *dbusGanesha) RemoveExport(exportID uint16) error {
 	log.WithFields(log.Fields{
 		"addr":     g.addr,
 		"exportID": exportID,
-		"method":   ganeshaRemExport,
-	}).Warn("ganesha DBus stub: RemoveExport called (add godbus/dbus/v5 to go.mod to enable)")
-	return nil
+	}).Debug("ganesha RemoveExport")
+	// RemoveExport takes the numeric export id as uint16.
+	return g.call(ganeshaRemExport, exportID)
 }

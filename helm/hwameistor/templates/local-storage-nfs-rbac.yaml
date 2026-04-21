@@ -8,6 +8,9 @@ rules:
       - hwameistor.io
     resources:
       - localvolumes
+      # Reactor reads Status.DevicePath from LocalVolumeReplica to find the
+      # host device node to mount into /srv/exports/<uid>.
+      - localvolumereplicas
     verbs:
       - get
       - list

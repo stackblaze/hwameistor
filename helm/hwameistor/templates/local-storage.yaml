@@ -76,6 +76,9 @@ spec:
         {{- if .Values.localStorage.member.config.snapshotRestoreTimeout}}
         - --snapshot-restore-timeout={{ .Values.localStorage.member.config.snapshotRestoreTimeout }}
         {{- end}}
+        {{- if .Values.rwx.enabled }}
+        - --enable-rwx=true
+        {{- end }}
         env:
         - name: POD_NAME
           valueFrom:

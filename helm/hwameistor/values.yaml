@@ -183,4 +183,24 @@ localDiskActionController:
   tag: ""
   resources: {}
 
+# ReadWriteMany (RWX) support via NFS. Off by default; requires csi-driver-nfs
+# to be installed separately in the cluster (driver name: nfs.csi.k8s.io).
+# See docs/docs/volumes/rwx.md.
+rwx:
+  enabled: false
+  reactor:
+    # Built from cmd/local-storage-nfs-reactor.
+    imageRepository: hwameistor/local-storage-nfs-reactor
+    tag: ""
+    resources: {}
+  ganesha:
+    # Upstream Ganesha image. Same one TopoLVM uses.
+    image: ghcr.io/kubernetes-sigs/nfs-ganesha:V6.5
+    resources: {}
+  storageClass:
+    enabled: true
+    # The RWO HwameiStor StorageClass that backs each RWX PVC's underlying volume.
+    backingStorageClassName: hwameistor-storage-lvm
+    reclaimPolicy: Delete
+    allowVolumeExpansion: true
 

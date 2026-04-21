@@ -39,6 +39,11 @@ rules:
       - watch
       - update
       - patch
+      {{- if .Values.rwx.enabled }}
+      # RWX reconciler creates/deletes the backing RWO PVC that fronts each RWX PVC.
+      - create
+      - delete
+      {{- end }}
   - apiGroups:
       - ""
     resources:
@@ -95,6 +100,20 @@ rules:
       - get
       - list
       - watch
+  {{- if .Values.rwx.enabled }}
+  # RWX reconciler creates and deletes the selector-less Service that fronts
+  # each RWX PVC. Kept in a separate rule so the default read-only permissions
+  # on Services are unchanged when RWX is off.
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - create
+      - update
+      - patch
+      - delete
+  {{- end }}
   - apiGroups:
       - ""
     resources:

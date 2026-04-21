@@ -91,14 +91,27 @@ spec:
                    /var/lib/nfs/ganesha \
                    /var/log/ganesha \
                    /usr/local/var/run/ganesha
-          # Start the system bus daemon first — the reactor sidecar will
-          # connect to /run/dbus/system_bus_socket to add/remove exports.
-          if [ ! -S /run/dbus/system_bus_socket ]; then
-            dbus-daemon --system --fork
-          fi
-          # Foreground Ganesha with our minimal config (dynamic exports
-          # come from the reactor via DBus).
-          exec ganesha.nfsd -F -L /dev/stdout -f /etc/ganesha/ganesha.conf
+
+          # This container has no init/reaper, so we run bash as PID 1 for
+          # the whole lifetime and keep both dbus-daemon and ganesha.nfsd
+          # as its children. If we 'exec ganesha.nfsd' bash gets replaced
+          # and the orphaned dbus-daemon gets reaped, leaving Ganesha
+          # unable to reach the bus.
+          dbus-daemon --system --nofork --nopidfile &
+          DBUS_PID=$!
+          # Wait briefly for the socket to appear so Ganesha's DBus thread
+          # can connect on startup.
+          for i in 1 2 3 4 5; do
+            [ -S /run/dbus/system_bus_socket ] && break
+            sleep 1
+          done
+
+          ganesha.nfsd -F -L /dev/stdout -f /etc/ganesha/ganesha.conf &
+          GANESHA_PID=$!
+
+          # Exit when either child dies so the Pod restarts cleanly.
+          wait -n "$DBUS_PID" "$GANESHA_PID"
+          exit $?
         securityContext:
           privileged: true
         ports:

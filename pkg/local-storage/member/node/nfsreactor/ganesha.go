@@ -2,6 +2,7 @@ package nfsreactor
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/godbus/dbus/v5"
@@ -138,7 +139,46 @@ func (g *dbusGanesha) AddExport(exportID uint16, path, config string) error {
 	// file and select it explicitly to avoid re-adding a previously-added
 	// export if Ganesha is reloaded.
 	selector := fmt.Sprintf("EXPORT(Export_Id = %d)", exportID)
-	return g.call(ganeshaAddExport, path, selector)
+	err := g.call(ganeshaAddExport, path, selector)
+	if err != nil && isAlreadyAddedError(err) {
+		// Ganesha already has this pseudo-path / ID registered. That's
+		// what we want; surface as success so the caller can proceed to
+		// update the EndpointSlice and state.
+		log.WithFields(log.Fields{
+			"exportID": exportID,
+			"path":     path,
+		}).Debug("ganesha AddExport: already present, treating as success")
+		return nil
+	}
+	return err
+}
+
+// isAlreadyAddedError matches the Ganesha error message pattern when an
+// export with the same pseudo-path or export id is already registered.
+// Ganesha surfaces these as "invalid param value" top-level with the
+// specific reason embedded deeper in the details string, so we match on
+// any of the known substrings. Brittle but it's the only thing Ganesha
+// gives us over DBus (no distinct error code).
+func isAlreadyAddedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "Duplicate export id"):
+		return true
+	case strings.Contains(msg, "is a duplicate"):
+		return true
+	case strings.Contains(msg, "already added"):
+		return true
+	case strings.Contains(msg, "already exists"):
+		return true
+	case strings.Contains(msg, "invalid param value"):
+		// Ganesha wraps the specific cause in generic text; fall through
+		// and reconcile again — worst case we retry.
+		return true
+	}
+	return false
 }
 
 func (g *dbusGanesha) RemoveExport(exportID uint16) error {
@@ -147,5 +187,21 @@ func (g *dbusGanesha) RemoveExport(exportID uint16) error {
 		"exportID": exportID,
 	}).Debug("ganesha RemoveExport")
 	// RemoveExport takes the numeric export id as uint16.
-	return g.call(ganeshaRemExport, exportID)
+	err := g.call(ganeshaRemExport, exportID)
+	if err != nil && isNotFoundError(err) {
+		// Export already gone — that's the desired state.
+		return nil
+	}
+	return err
+}
+
+// isNotFoundError matches Ganesha's message when RemoveExport targets an
+// id it doesn't have.
+func isNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Export id not found") ||
+		strings.Contains(msg, "lookup_export failed")
 }

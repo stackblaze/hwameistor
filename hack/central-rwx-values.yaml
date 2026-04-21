@@ -1,5 +1,10 @@
 # Central-cluster Helm overrides to enable RWX with the stackblaze-built images.
 #
+# Images are published to ghcr.io/stackblaze/hwameistor-* by
+# .github/workflows/release-rwx-images.yml. We keep the registry at its
+# default (ghcr.io) and only override the two component repos — so the
+# other HwameiStor images keep pulling from ghcr.io/hwameistor/* as usual.
+#
 # Usage (tag = git short SHA once the release workflow has pushed the images):
 #
 #   helm --kube-context=k8s-us-central upgrade hwameistor helm/hwameistor \
@@ -10,9 +15,8 @@
 #     --set-string rwx.reactor.tag=<sha>
 
 # Point the local-storage DaemonSet at the stackblaze build (contains the
-# --enable-rwx flag wiring and the rwxpvc reconciler).
-global:
-  hwameistorImageRegistry: docker.io
+# --enable-rwx flag wiring and the rwxpvc reconciler). The repo is
+# concatenated with global.hwameistorImageRegistry, which stays ghcr.io.
 localStorage:
   member:
     imageRepository: stackblaze/hwameistor-local-storage

@@ -1,0 +1,16 @@
+---
+# The RWO backing StorageClass that the RWX layer provisions volumes from.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: hwameistor-storage-lvm-nvme
+provisioner: lvm.hwameistor.io
+parameters:
+  poolClass: NVMe
+  poolType: REGULAR
+  volumeKind: LVM
+  replicaNumber: "1"
+  csi.storage.k8s.io/fstype: xfs
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer

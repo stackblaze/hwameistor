@@ -202,16 +202,55 @@ func (r *Reconciler) buildConfig(pvc *corev1.PersistentVolumeClaim, sc *storagev
 // ensureBackingPVC creates the backing RWO PVC if it does not exist, and
 // only grows the capacity on update. We never shrink — that would be
 // unsafe — and we never change the storage class once bound.
+//
+// HwameiStor's CSI CreateVolume needs a topology hint ("accessibility
+// requirements") which the external-provisioner only supplies once the
+// scheduler has picked a node — that normally happens via
+// WaitForFirstConsumer. But no user pod ever consumes the backing PVC
+// directly (the NFS PV does), so WaitForFirstConsumer would deadlock.
+// We break the cycle by stamping volume.kubernetes.io/selected-node
+// ourselves at creation time, picking any Ready LocalStorageNode.
 func (r *Reconciler) ensureBackingPVC(ctx context.Context, cfg rwxConfig) error {
 	desired := BuildBackingPVC(cfg)
 
 	existing := &corev1.PersistentVolumeClaim{}
 	err := r.Client.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, existing)
 	if apierrors.IsNotFound(err) {
+		node, perr := r.pickStorageNode(ctx)
+		if perr != nil {
+			return perr
+		}
+		if node != "" {
+			if desired.Annotations == nil {
+				desired.Annotations = map[string]string{}
+			}
+			desired.Annotations["volume.kubernetes.io/selected-node"] = node
+		}
 		return r.Client.Create(ctx, desired)
 	}
 	if err != nil {
 		return err
+	}
+
+	// Existing PVC: if it's still Pending and missing the selected-node
+	// hint (older reconciler, or a user-created PVC), stamp it now so
+	// provisioning can proceed.
+	if existing.Status.Phase != corev1.ClaimBound &&
+		existing.Annotations["volume.kubernetes.io/selected-node"] == "" {
+		node, perr := r.pickStorageNode(ctx)
+		if perr != nil {
+			return perr
+		}
+		if node != "" {
+			patch := existing.DeepCopy()
+			if patch.Annotations == nil {
+				patch.Annotations = map[string]string{}
+			}
+			patch.Annotations["volume.kubernetes.io/selected-node"] = node
+			if err := r.Client.Update(ctx, patch); err != nil {
+				return err
+			}
+		}
 	}
 
 	desiredCap := cfg.Capacity
@@ -224,6 +263,27 @@ func (r *Reconciler) ensureBackingPVC(ctx context.Context, cfg rwxConfig) error 
 		return r.Client.Update(ctx, existing)
 	}
 	return nil
+}
+
+// pickStorageNode returns the name of any LocalStorageNode currently in
+// a Ready state. Deterministically picks the lexicographically-first node
+// so repeated calls stay stable when multiple are eligible.
+func (r *Reconciler) pickStorageNode(ctx context.Context) (string, error) {
+	list := &apisv1alpha1.LocalStorageNodeList{}
+	if err := r.Client.List(ctx, list); err != nil {
+		return "", fmt.Errorf("list LocalStorageNodes: %w", err)
+	}
+	best := ""
+	for i := range list.Items {
+		n := &list.Items[i]
+		if n.Status.State != apisv1alpha1.NodeStateReady {
+			continue
+		}
+		if best == "" || n.Name < best {
+			best = n.Name
+		}
+	}
+	return best, nil
 }
 
 // ensureService creates the Service if it doesn't exist and returns the

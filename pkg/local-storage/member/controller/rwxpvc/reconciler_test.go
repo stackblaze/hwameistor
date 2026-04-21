@@ -33,6 +33,8 @@ func buildScheme(t *testing.T) *runtime.Scheme {
 	s.AddKnownTypes(apisv1alpha1.SchemeGroupVersion,
 		&apisv1alpha1.LocalVolume{},
 		&apisv1alpha1.LocalVolumeList{},
+		&apisv1alpha1.LocalStorageNode{},
+		&apisv1alpha1.LocalStorageNodeList{},
 	)
 	return s
 }

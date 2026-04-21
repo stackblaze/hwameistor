@@ -226,6 +226,15 @@ func (r *Reactor) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
 		return reconcile.Result{}, fmt.Errorf("write ganesha export config: %w", err)
 	}
+	// Ganesha rejects AddExport for a pseudo-path/export-id that already
+	// exists. On reactor restart our in-memory state is empty, so the
+	// export can still be registered in Ganesha. Remove first (no-op if
+	// absent), then re-add. RemoveExport errors are informational at this
+	// point — if the export truly isn't there, the subsequent AddExport
+	// is what matters.
+	if err := r.ganesha.RemoveExport(exportID); err != nil {
+		lg.WithError(err).WithField("exportID", exportID).Debug("ganesha RemoveExport (pre-add) returned — likely not present, will add")
+	}
 	if err := r.ganesha.AddExport(exportID, cfgPath, cfg); err != nil {
 		return reconcile.Result{}, fmt.Errorf("ganesha AddExport: %w", err)
 	}

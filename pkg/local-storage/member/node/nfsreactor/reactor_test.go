@@ -184,12 +184,15 @@ func buildReactor(t *testing.T, objs ...client.Object) (*Reactor, *fakeMount, *f
 	scheme := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 	fm, fg, fs := newFakeMount(), newFakeGanesha(), newFakeSlices()
+	// ExportRoot must be a writable dir — the reactor writes per-export
+	// Ganesha config files there. Using t.TempDir keeps tests hermetic and
+	// cross-platform.
 	r := NewForTest(Options{
 		Client:       c,
 		NodeName:     testNode,
 		PodIP:        "10.1.2.3",
 		PodNamespace: "hwameistor",
-		ExportRoot:   "/srv/exports",
+		ExportRoot:   t.TempDir(),
 	}, fm, fg, fs)
 	return r, fm, fg, fs
 }

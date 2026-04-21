@@ -132,8 +132,13 @@ func (g *dbusGanesha) AddExport(exportID uint16, path, config string) error {
 		"exportID": exportID,
 		"path":     path,
 	}).Debug("ganesha AddExport")
-	// Ganesha AddExport signature is (path string, config string).
-	return g.call(ganeshaAddExport, path, config)
+	// Ganesha's DBus AddExport takes two strings: the path to a config file
+	// on disk, and an optional "EXPORT(export_id = N)" expression selecting
+	// which exports from that file to add. We write one EXPORT{} block per
+	// file and select it explicitly to avoid re-adding a previously-added
+	// export if Ganesha is reloaded.
+	selector := fmt.Sprintf("EXPORT(Export_Id = %d)", exportID)
+	return g.call(ganeshaAddExport, path, selector)
 }
 
 func (g *dbusGanesha) RemoveExport(exportID uint16) error {

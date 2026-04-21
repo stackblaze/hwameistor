@@ -171,9 +171,13 @@ func (r *Reactor) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	if err != nil {
 		return reconcile.Result{}, err
 	}
+	// HwameiStor's LVM driver doesn't record the SC fsType on the LV unless
+	// NodeStageVolume runs — which it never does for RWX backing volumes.
+	// Default to xfs to match the StorageClass we ship (and what HwameiStor
+	// itself defaults to).
 	fsType := lv.Status.PublishedFSType
 	if fsType == "" {
-		fsType = "ext4"
+		fsType = "xfs"
 	}
 	serviceName := serviceNameFor(lv)
 	serviceNS := lv.Spec.PersistentVolumeClaimNamespace
@@ -210,7 +214,19 @@ func (r *Reactor) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	}
 
 	cfg := RenderExportConfig(exportID, mountPath, uid)
-	if err := r.ganesha.AddExport(exportID, mountPath, cfg); err != nil {
+	// Ganesha's DBus AddExport takes a path to a config *file*, not inline
+	// config text. Write the export block under <ExportRoot>/<uid>.conf so
+	// both the reactor and ganesha containers can see it on the shared
+	// emptyDir. Make sure ExportRoot exists first — it normally does (mount
+	// created it), but during unit tests the fake MountClient doesn't.
+	cfgPath := filepath.Join(r.opts.ExportRoot, uid+".conf")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		return reconcile.Result{}, fmt.Errorf("mkdir ExportRoot: %w", err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		return reconcile.Result{}, fmt.Errorf("write ganesha export config: %w", err)
+	}
+	if err := r.ganesha.AddExport(exportID, cfgPath, cfg); err != nil {
 		return reconcile.Result{}, fmt.Errorf("ganesha AddExport: %w", err)
 	}
 

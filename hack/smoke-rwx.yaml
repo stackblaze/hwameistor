@@ -1,0 +1,73 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: smoke-rwx
+  namespace: default
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: hwameistor-storage-lvm-rwx
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: smoke-rwx-a
+  namespace: default
+  labels: { app: smoke-rwx, role: writer }
+spec:
+  restartPolicy: Never
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels: { app: smoke-rwx }
+        topologyKey: kubernetes.io/hostname
+  containers:
+  - name: writer
+    image: alpine:3.20
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      set -e
+      echo "hello from pod A on $(hostname) at $(date -u +%FT%TZ)" >> /data/shared.log
+      ls -la /data/
+      cat /data/shared.log
+      sleep 300
+    volumeMounts: [{ name: data, mountPath: /data }]
+  volumes:
+  - name: data
+    persistentVolumeClaim: { claimName: smoke-rwx }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: smoke-rwx-b
+  namespace: default
+  labels: { app: smoke-rwx, role: reader }
+spec:
+  restartPolicy: Never
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels: { app: smoke-rwx }
+        topologyKey: kubernetes.io/hostname
+  containers:
+  - name: reader
+    image: alpine:3.20
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      set -e
+      sleep 5
+      echo "hello from pod B on $(hostname) at $(date -u +%FT%TZ)" >> /data/shared.log
+      ls -la /data/
+      cat /data/shared.log
+      sleep 300
+    volumeMounts: [{ name: data, mountPath: /data }]
+  volumes:
+  - name: data
+    persistentVolumeClaim: { claimName: smoke-rwx }

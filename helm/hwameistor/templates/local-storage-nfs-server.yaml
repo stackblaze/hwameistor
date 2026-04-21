@@ -44,7 +44,7 @@ spec:
         - --nodename=$(MY_NODENAME)
         - --pod-ip=$(POD_IP)
         - --pod-namespace=$(POD_NAMESPACE)
-        - --ganesha-dbus=unix:/run/dbus/system_bus_socket
+        - --ganesha-dbus=unix:path=/run/dbus/system_bus_socket
         - --export-root=/srv/exports
         env:
         - name: MY_NODENAME

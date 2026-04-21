@@ -31,7 +31,7 @@ var (
 	nodeName       = flag.String("nodename", "", "Node name (required)")
 	podIP          = flag.String("pod-ip", "", "Pod IP for EndpointSlice (required)")
 	podNamespace   = flag.String("pod-namespace", "", "Pod namespace (required)")
-	dbusAddr       = flag.String("ganesha-dbus", "unix:/run/dbus/system_bus_socket", "Ganesha DBus system bus socket")
+	dbusAddr       = flag.String("ganesha-dbus", "unix:path=/run/dbus/system_bus_socket", "Ganesha DBus system bus socket")
 	exportRoot     = flag.String("export-root", "/srv/exports", "Mount root for NFS exports")
 	resyncInterval = flag.Duration("resync", 15*time.Second, "Periodic full resync interval")
 	logLevel       = flag.Int("v", 4, "log verbosity")

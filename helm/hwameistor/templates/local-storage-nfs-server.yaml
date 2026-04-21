@@ -78,6 +78,27 @@ spec:
       - name: ganesha
         image: {{ .Values.rwx.ganesha.image }}
         imagePullPolicy: IfNotPresent
+        # The upstream image (ghcr.io/kubernetes-sigs/nfs-ganesha) has an
+        # entrypoint of /bin/bash with no command, so we start both
+        # dbus-daemon (for AddExport/RemoveExport IPC from the reactor)
+        # and ganesha.nfsd explicitly. -F runs Ganesha in the foreground
+        # so the container stays alive.
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          set -e
+          mkdir -p /run/dbus \
+                   /var/lib/nfs/ganesha \
+                   /var/log/ganesha \
+                   /usr/local/var/run/ganesha
+          # Start the system bus daemon first — the reactor sidecar will
+          # connect to /run/dbus/system_bus_socket to add/remove exports.
+          if [ ! -S /run/dbus/system_bus_socket ]; then
+            dbus-daemon --system --fork
+          fi
+          # Foreground Ganesha with our minimal config (dynamic exports
+          # come from the reactor via DBus).
+          exec ganesha.nfsd -F -L /dev/stdout -f /etc/ganesha/ganesha.conf
         securityContext:
           privileged: true
         ports:
@@ -134,4 +155,8 @@ data:
         Grace_Period = 30;
     }
     # Exports are added dynamically by the nfs-reactor sidecar via DBus.
+    # Without this block Ganesha ignores AddExport/RemoveExport calls.
+    NFS_KRB5 {
+        Active_krb5 = false;
+    }
 {{- end }}

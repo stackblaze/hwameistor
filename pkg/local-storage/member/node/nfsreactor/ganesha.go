@@ -134,12 +134,11 @@ func (g *dbusGanesha) AddExport(exportID uint16, path, config string) error {
 		"path":     path,
 	}).Debug("ganesha AddExport")
 	// Ganesha's DBus AddExport takes two strings: the path to a config file
-	// on disk, and an optional "EXPORT(export_id = N)" expression selecting
-	// which exports from that file to add. We write one EXPORT{} block per
-	// file and select it explicitly to avoid re-adding a previously-added
-	// export if Ganesha is reloaded.
-	selector := fmt.Sprintf("EXPORT(Export_Id = %d)", exportID)
-	err := g.call(ganeshaAddExport, path, selector)
+	// on disk, and an optional expression selecting which exports from that
+	// file to add. We write one EXPORT{} block per file so an empty
+	// selector means "add every export in this file" — that keeps Ganesha
+	// happy regardless of which Export_Id the file actually contains.
+	err := g.call(ganeshaAddExport, path, "")
 	if err != nil && isAlreadyAddedError(err) {
 		// Ganesha already has this pseudo-path / ID registered. That's
 		// what we want; surface as success so the caller can proceed to

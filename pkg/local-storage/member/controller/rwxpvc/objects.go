@@ -51,17 +51,26 @@ func MirrorPVName(userPVCUID types.UID) string {
 	return MirrorPVPrefix + string(userPVCUID)
 }
 
-// ExportPath returns the path inside the NFS server where the backing
-// volume should be exported.
+// ExportPath returns the on-disk path inside the reactor pod where the
+// backing LV is mounted and Ganesha serves from (the 'Path' attribute in
+// the EXPORT{} block). This is the server-side view.
 func ExportPath(userPVCUID types.UID) string {
 	return ExportPathPrefix + string(userPVCUID)
 }
 
+// ExportPseudoPath returns the NFSv4 pseudo path that clients mount.
+// This must match the 'Pseudo' attribute Ganesha publishes for the
+// export — NOT the real on-disk path. See RenderExportConfig in the
+// reactor package where Pseudo is set to "/<uid>".
+func ExportPseudoPath(userPVCUID types.UID) string {
+	return "/" + string(userPVCUID)
+}
+
 // nfsVolumeHandle returns the standard csi-driver-nfs volumeHandle format:
-// <server>#<share>#<optional sub dir>. The trailing empty segment mirrors
-// the convention used by csi-driver-nfs examples.
+// <server>#<share>#<optional sub dir>. `share` is the NFSv4 pseudo path,
+// since that is what clients actually mount — not the real path.
 func nfsVolumeHandle(clusterIP string, uid types.UID) string {
-	return fmt.Sprintf("%s#%s#", clusterIP, ExportPath(uid))
+	return fmt.Sprintf("%s#%s#", clusterIP, ExportPseudoPath(uid))
 }
 
 // BuildBackingPVC builds the RWO PVC that actually stores the data. It is
@@ -169,7 +178,9 @@ func BuildMirrorPV(cfg rwxConfig, svc *corev1.Service) *corev1.PersistentVolume 
 					VolumeHandle:     nfsVolumeHandle(clusterIP, cfg.UserPVCUID),
 					VolumeAttributes: map[string]string{
 						"server": clusterIP,
-						"share":  ExportPath(cfg.UserPVCUID),
+						// NFSv4 pseudo path, not the real on-disk Path,
+						// since the client mounts the pseudo-root.
+						"share": ExportPseudoPath(cfg.UserPVCUID),
 					},
 				},
 			},

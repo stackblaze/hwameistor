@@ -170,7 +170,8 @@ func TestReconcile_CreatesBackingChain(t *testing.T) {
 	if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != NFSCSIDriver {
 		t.Errorf("mirror PV should use nfs.csi.k8s.io driver, got %+v", pv.Spec.CSI)
 	}
-	wantHandle := "10.0.0.42#/srv/exports/" + testUserUID + "#"
+	// NFSv4 pseudo path — clients mount /<uid>, not the on-disk Path.
+	wantHandle := "10.0.0.42#/" + testUserUID + "#"
 	if pv.Spec.CSI.VolumeHandle != wantHandle {
 		t.Errorf("volumeHandle mismatch: got %q want %q", pv.Spec.CSI.VolumeHandle, wantHandle)
 	}

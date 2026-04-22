@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: %s
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: hwameistor-storage-lvm-hdd
+  resources:
+    requests:
+      storage: %dMi

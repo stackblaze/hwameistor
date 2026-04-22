@@ -1,0 +1,17 @@
+apiVersion: hwameistor.io/v1alpha1
+kind: BackupConfig
+metadata:
+  name: default
+spec:
+  s3:
+    endpoint: %q
+    bucket: %q
+    prefix: %q
+    credentialsSecretRef:
+      name: %s
+      namespace: %s
+  resticPasswordSecretRef:
+    name: %s
+    namespace: %s
+  volumeSnapshotClassName: hwameistor-storage-lvm-snapshot
+  # Leave schedule empty so the controller only backs up on manual trigger.

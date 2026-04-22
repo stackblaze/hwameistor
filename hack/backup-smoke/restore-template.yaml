@@ -1,0 +1,11 @@
+apiVersion: hwameistor.io/v1alpha1
+kind: Restore
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  sourceNamespace: %s
+  sourcePVCName: %s
+  targetPVCName: %s
+  size: %dMi
+  storageClassName: hwameistor-storage-lvm-hdd

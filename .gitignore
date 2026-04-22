@@ -21,6 +21,9 @@ bin/
 *.swo
 *~
 coverage.txt
+.claude/
+/local-storage
+/hwameistor-*
 
 # Kubernetes Generated files - skip generated files, except for vendored files
 !vendor/**/zz_generated.*

@@ -183,4 +183,21 @@ localDiskActionController:
   tag: ""
   resources: {}
 
-
+# backup -- Opt-in restic-based backup/restore for hwameistor PVCs.
+# When enabled, the local-storage controller runs three additional
+# reconcilers (BackupConfig / PVCBackup / Restore) that drive restic
+# backups to any S3-compatible object store. See
+# docs/docs/volumes/backup-restore.md for full setup.
+backup:
+  # backup.enabled -- Enable the BackupConfig/PVCBackup/Restore controllers.
+  # When true, the controller watches the cluster-scoped BackupConfig named
+  # `default` and drives restic-based backups of matching PVCs to S3.
+  enabled: false
+  # backup.resticImage -- Container image used for the mover and restore
+  # Jobs. Must contain the `restic` binary.
+  resticImage: "restic/restic:0.17.3"
+  # backup.moverServiceAccount -- ServiceAccount under which the mover and
+  # restore Jobs run in each target namespace. Must already exist (or be
+  # created separately) in every namespace that contains a backed-up PVC.
+  # Defaults to the namespace's `default` ServiceAccount.
+  moverServiceAccount: "default"

@@ -76,6 +76,11 @@ spec:
         {{- if .Values.localStorage.member.config.snapshotRestoreTimeout}}
         - --snapshot-restore-timeout={{ .Values.localStorage.member.config.snapshotRestoreTimeout }}
         {{- end}}
+        {{- if .Values.backup.enabled }}
+        - --enable-backup
+        - --restic-image={{ .Values.backup.resticImage }}
+        - --backup-mover-service-account={{ .Values.backup.moverServiceAccount }}
+        {{- end }}
         env:
         - name: POD_NAME
           valueFrom:

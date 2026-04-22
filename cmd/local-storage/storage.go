@@ -23,6 +23,7 @@ import (
 	apisv1alpha1 "github.com/hwameistor/hwameistor/pkg/apis/hwameistor/v1alpha1"
 	"github.com/hwameistor/hwameistor/pkg/local-storage/controller"
 	"github.com/hwameistor/hwameistor/pkg/local-storage/member"
+	backupctrl "github.com/hwameistor/hwameistor/pkg/local-storage/member/controller/backup"
 	"github.com/hwameistor/hwameistor/pkg/local-storage/utils"
 	"github.com/hwameistor/hwameistor/pkg/local-storage/utils/datacopy"
 )
@@ -52,6 +53,12 @@ var (
 	migrateDataNeedCheck    = flag.Bool("migrate-check", false, "Enable data verification during data migration")
 	snapshotRestoreTimeout  = flag.Int("snapshot-restore-timeout", 600, "Time to restore VolumeReplica Snapshot，in seconds")
 	pvMetadataSize          = flag.Int("pv-metadata-size", 4*1024*1024, "The size of the metadata of the PV in Bytes, default 4MB")
+
+	// Backup/restore (restic) controller flags. Off by default.
+	enableBackup       = flag.Bool("enable-backup", false, "Enable the restic-based backup/restore controllers (BackupConfig, PVCBackup, Restore)")
+	resticImage        = flag.String("restic-image", backupctrl.DefaultResticImage, "Container image used for the restic mover/restore Jobs")
+	moverServiceAcct   = flag.String("backup-mover-service-account", "default", "ServiceAccount under which backup/restore Jobs run in each target namespace")
+	backupCtrlNSOverride = flag.String("backup-controller-namespace", "", "Namespace where user-authored BackupConfig Secrets live. Defaults to --namespace")
 )
 
 var BUILDVERSION, BUILDTIME, GOVERSION string
@@ -159,6 +166,27 @@ func main() {
 	if err := controller.AddToManager(mgr); err != nil {
 		log.WithError(err).Error("Failed to setup controllers for all local storage resources")
 		os.Exit(1)
+	}
+
+	// Optionally register the restic-based backup/restore reconcilers.
+	// BackupConfig/PVCBackup/Restore CRDs must be installed before enabling.
+	if *enableBackup {
+		backupNS := *backupCtrlNSOverride
+		if backupNS == "" {
+			backupNS = *namespace
+		}
+		log.WithFields(log.Fields{
+			"resticImage":         *resticImage,
+			"moverServiceAccount": *moverServiceAcct,
+			"controllerNamespace": backupNS,
+		}).Info("Registering backup/restore controllers")
+		if err := backupctrl.SetupBackupReconcilers(
+			mgr, mgr.GetClient(), mgr.GetAPIReader(),
+			backupNS, *resticImage, *moverServiceAcct,
+		); err != nil {
+			log.WithError(err).Error("Failed to setup backup/restore controllers")
+			os.Exit(1)
+		}
 	}
 
 	//initialize the local storage node/member as:

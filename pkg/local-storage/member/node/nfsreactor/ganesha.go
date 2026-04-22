@@ -12,12 +12,17 @@ import (
 // DefaultExportConfigTemplate is the Ganesha EXPORT{} block written per-volume.
 // First %d: export ID. First %s: absolute path. Second %s: short pseudo path
 // (we use the UID).
+// DefaultExportConfigTemplate is written to the Ganesha export config file
+// for each RWX volume. We disable root squashing so that pods running as
+// root (the common case for test workloads and anything not yet migrated
+// off uid 0) can write. Operators who care about squashing can override
+// per-SC with the lvm.hwameistor.io/nfs-squash parameter in a follow-up.
 const DefaultExportConfigTemplate = `EXPORT {
     Export_Id = %d;
     Path = "%s";
     Pseudo = "/%s";
     Access_Type = RW;
-    Squash = Root_Squash;
+    Squash = No_Root_Squash;
     SecType = sys;
     FSAL { Name = VFS; }
 }`

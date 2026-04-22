@@ -133,12 +133,14 @@ func (g *dbusGanesha) AddExport(exportID uint16, path, config string) error {
 		"exportID": exportID,
 		"path":     path,
 	}).Debug("ganesha AddExport")
-	// Ganesha's DBus AddExport takes two strings: the path to a config file
-	// on disk, and an optional expression selecting which exports from that
-	// file to add. We write one EXPORT{} block per file so an empty
-	// selector means "add every export in this file" — that keeps Ganesha
-	// happy regardless of which Export_Id the file actually contains.
-	err := g.call(ganeshaAddExport, path, "")
+	// Ganesha's DBus AddExport takes two strings: a path to a config file
+	// on disk, and a selector expression that picks one EXPORT block from
+	// that file. Ganesha's parser is whitespace-strict here — "Export_Id=N"
+	// works, "Export_Id = N" does not (confirmed against V6.5 which
+	// replied "Error finding exports: EXPORT(Export_Id = 2) because No
+	// such file or directory"). So we format without spaces.
+	selector := fmt.Sprintf("EXPORT(Export_Id=%d)", exportID)
+	err := g.call(ganeshaAddExport, path, selector)
 	if err != nil && isAlreadyAddedError(err) {
 		// Ganesha already has this pseudo-path / ID registered. That's
 		// what we want; surface as success so the caller can proceed to

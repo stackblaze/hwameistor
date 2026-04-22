@@ -63,6 +63,11 @@
   {{- default .Chart.Version .Values.localDiskActionController.tag -}}
 {{- end -}}
 
+{{/* Allow RWX NFS reactor image tag to be overridden. */}}
+{{- define "hwameistor.rwxReactorImageTag" -}}
+  {{- default .Chart.Version .Values.rwx.reactor.tag -}}
+{{- end -}}
+
 
 {{/* Allow KubeletRootDir to be overridden. */}}
 {{- define "hwameistor.kubeletRootDir" -}}

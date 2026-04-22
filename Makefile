@@ -431,6 +431,43 @@ release_lda:
 	# push to a public registry
 	${MUILT_ARCH_PUSH_CMD} -i ${LDA_CONTROLLER_IMAGE_NAME}:${RELEASE_TAG}
 
+
+#### for Local Storage NFS Reactor (RWX sidecar) ##########
+LS_NFS_REACTOR_MODULE_NAME = local-storage-nfs-reactor
+LS_NFS_REACTOR_BUILD_INPUT = ${CMDS_DIR}/${LS_NFS_REACTOR_MODULE_NAME}/main.go
+
+.PHONY: compile_ls_nfs_reactor
+compile_ls_nfs_reactor:
+	GOARCH=amd64 ${BUILD_ENVS} ${BUILD_CMD} ${BUILD_OPTIONS} -o ${LS_NFS_REACTOR_BUILD_OUTPUT} ${LS_NFS_REACTOR_BUILD_INPUT}
+
+.PHONY: compile_ls_nfs_reactor_arm64
+compile_ls_nfs_reactor_arm64:
+	GOARCH=arm64 ${BUILD_ENVS} ${BUILD_CMD} ${BUILD_OPTIONS} -o ${LS_NFS_REACTOR_BUILD_OUTPUT} ${LS_NFS_REACTOR_BUILD_INPUT}
+
+.PHONY: build_ls_nfs_reactor_image
+build_ls_nfs_reactor_image:
+	@echo "Build local-storage-nfs-reactor image ${LS_NFS_REACTOR_IMAGE_NAME}:${IMAGE_TAG}"
+	${DOCKER_MAKE_CMD} make compile_ls_nfs_reactor
+	${DOCKER_BUILDX_CMD_AMD64} -t ${LS_NFS_REACTOR_IMAGE_NAME}:${IMAGE_TAG} -f ${LS_NFS_REACTOR_IMAGE_DOCKERFILE} ${PROJECT_SOURCE_CODE_DIR}
+
+.PHONY: build_ls_nfs_reactor_image_arm64
+build_ls_nfs_reactor_image_arm64:
+	@echo "Build local-storage-nfs-reactor image ${LS_NFS_REACTOR_IMAGE_NAME}:${IMAGE_TAG}"
+	${DOCKER_MAKE_CMD} make compile_ls_nfs_reactor_arm64
+	${DOCKER_BUILDX_CMD_ARM64} -t ${LS_NFS_REACTOR_IMAGE_NAME}:${IMAGE_TAG} -f ${LS_NFS_REACTOR_IMAGE_DOCKERFILE} ${PROJECT_SOURCE_CODE_DIR}
+
+.PHONY: release_ls_nfs_reactor
+release_ls_nfs_reactor:
+	# build for amd64 version
+	${DOCKER_MAKE_CMD} make compile_ls_nfs_reactor
+	${DOCKER_BUILDX_CMD_AMD64} -t ${LS_NFS_REACTOR_IMAGE_NAME}:${RELEASE_TAG}-amd64 -f ${LS_NFS_REACTOR_IMAGE_DOCKERFILE} ${PROJECT_SOURCE_CODE_DIR}
+	# build for arm64 version
+	${DOCKER_MAKE_CMD} make compile_ls_nfs_reactor_arm64
+	${DOCKER_BUILDX_CMD_ARM64} -t ${LS_NFS_REACTOR_IMAGE_NAME}:${RELEASE_TAG}-arm64 -f ${LS_NFS_REACTOR_IMAGE_DOCKERFILE} ${PROJECT_SOURCE_CODE_DIR}
+	# push to a public registry
+	${MUILT_ARCH_PUSH_CMD} -i ${LS_NFS_REACTOR_IMAGE_NAME}:${RELEASE_TAG}
+
+
 ### for hwameictl ###
 HWAMEICTL_BUILD_INPUT = ${CMDS_DIR}/hwameictl/hwameictl.go
 # Example:

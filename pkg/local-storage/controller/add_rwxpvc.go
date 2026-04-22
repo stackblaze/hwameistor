@@ -6,19 +6,14 @@ import (
 	"github.com/hwameistor/hwameistor/pkg/local-storage/member/controller/rwxpvc"
 )
 
-// Enabled gates registration of the RWX-PVC reconciler. It is off by
-// default so existing deployments are unaffected; an operator or wiring
-// layer sets it to true to activate the NFS-backed RWX flow.
+// Enabled gates the RWX-PVC reconciler. Off by default so existing
+// deployments are unaffected; main.go flips it per --enable-rwx.
 var Enabled bool
 
 func init() {
 	AddToManagerFuncs = append(AddToManagerFuncs, addRWXPVCController)
 }
 
-// addRWXPVCController registers the rwxpvc reconciler with the manager
-// only when Enabled is true. Guarding inside the function is simpler than
-// a conditional init and lets callers flip the flag at program startup
-// before manager.Start is called.
 func addRWXPVCController(mgr manager.Manager) error {
 	if !Enabled {
 		return nil

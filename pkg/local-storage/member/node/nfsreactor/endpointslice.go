@@ -14,19 +14,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// NFSPort is the NFSv4 TCP port; we skip rpcbind because NFSv4 does not need
-// it.
+// NFSPort is the NFSv4 TCP port. rpcbind is skipped — NFSv4 doesn't need it.
 const NFSPort int32 = 2049
 
-// EndpointSliceClient writes/deletes the per-node EndpointSlice that fronts
-// this pod's Ganesha for the tenant Service matching the backing PVC.
 type EndpointSliceClient interface {
-	// Put creates or updates "<serviceName>-<node>" in serviceNamespace,
-	// pointing at podIP:2049. Returns nil if the Service doesn't exist
-	// (the controller hasn't created it yet); the next resync will retry.
 	Put(ctx context.Context, serviceName, serviceNamespace string) error
-	// Delete removes the per-node EndpointSlice for (serviceName, ns).
-	// Returns nil if it doesn't exist.
 	Delete(ctx context.Context, serviceName, serviceNamespace string) error
 }
 
@@ -36,13 +28,11 @@ type realSlices struct {
 	podIP    string
 }
 
-// NewEndpointSliceClient builds a real EndpointSliceClient.
 func NewEndpointSliceClient(c client.Client, nodeName, podIP string) EndpointSliceClient {
 	return &realSlices{client: c, nodeName: nodeName, podIP: podIP}
 }
 
-// sanitizeNodeName lowercases and replaces characters that aren't allowed in
-// Kubernetes object names. EndpointSlice names must be RFC 1123 labels.
+// sanitizeNodeName: EndpointSlice names must be RFC 1123 labels.
 func sanitizeNodeName(n string) string {
 	n = strings.ToLower(n)
 	var b strings.Builder
@@ -61,15 +51,14 @@ func sanitizeNodeName(n string) string {
 	return out
 }
 
-// sliceName returns the EndpointSlice name for this (service, node) pair.
 func sliceName(serviceName, nodeName string) string {
 	return fmt.Sprintf("%s-%s", serviceName, sanitizeNodeName(nodeName))
 }
 
+// Put creates or updates "<serviceName>-<node>" pointing at podIP:2049.
+// If the Service doesn't exist yet (controller hasn't created it), we
+// skip — the next resync will retry.
 func (r *realSlices) Put(ctx context.Context, serviceName, serviceNamespace string) error {
-	// Look up the Service first — if it doesn't exist yet, skip quietly
-	// so we don't create orphan EndpointSlices the service controller
-	// could later reap.
 	svc := &corev1.Service{}
 	err := r.client.Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: serviceName}, svc)
 	if err != nil {
@@ -96,8 +85,7 @@ func (r *realSlices) Put(ctx context.Context, serviceName, serviceNamespace stri
 			Namespace: serviceNamespace,
 			Labels: map[string]string{
 				discoveryv1.LabelServiceName: serviceName,
-				// endpointslice.kubernetes.io/managed-by must be a valid
-				// label value (alphanumeric + '-_.'), no '/'.
+				// managed-by label value can't contain '/'.
 				discoveryv1.LabelManagedBy: "hwameistor-nfs-reactor",
 			},
 		},
@@ -122,7 +110,6 @@ func (r *realSlices) Put(ctx context.Context, serviceName, serviceNamespace stri
 	if err != nil {
 		return fmt.Errorf("get endpointslice %s/%s: %w", serviceNamespace, name, err)
 	}
-	// Update in place — preserve ResourceVersion.
 	existing.Labels = desired.Labels
 	existing.AddressType = desired.AddressType
 	existing.Endpoints = desired.Endpoints

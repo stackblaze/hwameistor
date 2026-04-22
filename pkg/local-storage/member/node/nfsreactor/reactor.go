@@ -20,11 +20,10 @@ import (
 	apisv1alpha1 "github.com/hwameistor/hwameistor/pkg/apis/hwameistor/v1alpha1"
 )
 
-// ExportAnnotation is the LocalVolume annotation whose value is the user PVC
-// UID. Non-empty means "export this LV over NFS". Empty / missing means skip.
+// ExportAnnotation on a LocalVolume holds the user PVC UID; non-empty means
+// "serve this LV over NFS".
 const ExportAnnotation = "hwameistor.io/rwx-export"
 
-// Options bundles the Reactor's configuration.
 type Options struct {
 	Client         client.Client
 	NodeName       string
@@ -35,7 +34,6 @@ type Options struct {
 	ResyncInterval time.Duration
 }
 
-// Reactor is the per-node NFS export reconciler.
 type Reactor struct {
 	opts    Options
 	state   *State
@@ -44,7 +42,6 @@ type Reactor struct {
 	slices  EndpointSliceClient
 }
 
-// New builds a Reactor with the real mount/ganesha/slice clients.
 func New(opts Options) *Reactor {
 	return &Reactor{
 		opts:    opts,
@@ -55,22 +52,12 @@ func New(opts Options) *Reactor {
 	}
 }
 
-// NewForTest builds a Reactor with injected fakes. Used by tests only.
+// NewForTest injects fakes.
 func NewForTest(opts Options, m MountClient, g GaneshaClient, s EndpointSliceClient) *Reactor {
 	return &Reactor{opts: opts, state: NewState(), mounts: m, ganesha: g, slices: s}
 }
 
-// SetupWithManager wires the Reactor into a controller-runtime Manager.
-// It watches LocalVolume and LocalVolumeReplica (changes on this node's
-// replicas must re-enqueue the owning LV), and adds a periodic resync as a
-// Runnable on the manager.
 func (r *Reactor) SetupWithManager(mgr manager.Manager) error {
-	// Best-effort state rehydrate from /proc/mounts. Ignored on platforms
-	// where /proc/mounts isn't available (e.g. test runs).
-	if err := r.state.RebuildFromMounts(r.opts.ExportRoot); err != nil {
-		log.WithError(err).Debug("nfsreactor: could not rebuild state from /proc/mounts (ok if running off-node)")
-	}
-
 	c, err := controller.New("nfs-reactor", mgr, controller.Options{Reconciler: r})
 	if err != nil {
 		return fmt.Errorf("build controller: %w", err)
@@ -78,6 +65,7 @@ func (r *Reactor) SetupWithManager(mgr manager.Manager) error {
 	if err := c.Watch(&source.Kind{Type: &apisv1alpha1.LocalVolume{}}, &handler.EnqueueRequestForObject{}); err != nil {
 		return fmt.Errorf("watch LocalVolume: %w", err)
 	}
+	// Replicas belong to an LV; re-enqueue the owner.
 	replicaToVolume := handler.EnqueueRequestsFromMapFunc(func(a client.Object) []reconcile.Request {
 		lvr, ok := a.(*apisv1alpha1.LocalVolumeReplica)
 		if !ok || lvr.Spec.VolumeName == "" {
@@ -89,16 +77,14 @@ func (r *Reactor) SetupWithManager(mgr manager.Manager) error {
 		return fmt.Errorf("watch LocalVolumeReplica: %w", err)
 	}
 
-	// Register the periodic full resync as a Runnable.
 	if err := mgr.Add(manager.RunnableFunc(r.runResync)); err != nil {
 		return fmt.Errorf("add resync runnable: %w", err)
 	}
 	return nil
 }
 
-// runResync lists all LocalVolumes every ResyncInterval and enqueues a
-// reconcile for each by calling Reconcile directly. This compensates for
-// missed events and catches drift (e.g. manual umount on the node).
+// runResync picks up missed events and catches out-of-band drift (manual
+// umount, Ganesha restart, etc).
 func (r *Reactor) runResync(ctx context.Context) error {
 	interval := r.opts.ResyncInterval
 	if interval <= 0 {
@@ -106,7 +92,6 @@ func (r *Reactor) runResync(ctx context.Context) error {
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
-	// Fire once at startup so we converge quickly.
 	r.resyncOnce(ctx)
 	for {
 		select {
@@ -132,15 +117,14 @@ func (r *Reactor) resyncOnce(ctx context.Context) {
 	}
 }
 
-// Reconcile brings the on-node state for one LocalVolume in line with its
-// annotation + replica placement. Safe to call repeatedly; idempotent.
+// Reconcile brings on-node state (mount, Ganesha export, EndpointSlice) in
+// line with the LV's annotation and replica placement. Idempotent.
 func (r *Reactor) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	lg := log.WithField("lv", req.Name)
 
 	lv := &apisv1alpha1.LocalVolume{}
 	err := r.opts.Client.Get(ctx, types.NamespacedName{Name: req.Name}, lv)
 	if apierrors.IsNotFound(err) {
-		// LV gone — tear down anything we were serving for it.
 		if prior := r.state.GetByLV(req.Name); prior != nil {
 			lg.Info("LocalVolume deleted, tearing down export")
 			if terr := r.ensureAbsent(ctx, prior); terr != nil {
@@ -166,15 +150,12 @@ func (r *Reactor) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 		return reconcile.Result{}, nil
 	}
 
-	// Eligible. Build target served-state, diff against in-memory state.
 	device, err := r.resolveDevicePath(ctx, lv)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
-	// HwameiStor's LVM driver doesn't record the SC fsType on the LV unless
-	// NodeStageVolume runs — which it never does for RWX backing volumes.
-	// Default to xfs to match the StorageClass we ship (and what HwameiStor
-	// itself defaults to).
+	// Status.PublishedFSType is only set when NodeStageVolume runs, which
+	// never happens for RWX backing volumes — no pod mounts them directly.
 	fsType := lv.Status.PublishedFSType
 	if fsType == "" {
 		fsType = "xfs"
@@ -182,8 +163,6 @@ func (r *Reactor) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	serviceName := serviceNameFor(lv)
 	serviceNS := lv.Spec.PersistentVolumeClaimNamespace
 	if serviceNS == "" {
-		// Fall back to our own namespace so we don't crash; this is really
-		// a misconfiguration the controller should set.
 		serviceNS = r.opts.PodNamespace
 	}
 	mountPath := filepath.Join(r.opts.ExportRoot, uid)
@@ -192,30 +171,20 @@ func (r *Reactor) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	if existing != nil && existing.ExportID != 0 &&
 		existing.Device == device && existing.MountPath == mountPath &&
 		existing.ServiceName == serviceName && existing.ServiceNS == serviceNS {
-		// Everything already matches. Make sure the EndpointSlice is present
-		// (cheap) and return.
 		if err := r.slices.Put(ctx, serviceName, serviceNS); err != nil {
 			return reconcile.Result{}, err
 		}
 		return reconcile.Result{}, nil
 	}
 
-	// Mount (no-op if already mounted).
 	if err := r.mounts.Mount(device, mountPath, fsType); err != nil {
 		return reconcile.Result{}, err
 	}
 
-	// Assign export ID deterministically from the user PVC UID so the same
-	// export keeps the same id across reactor restarts (see State.AllocateID
-	// comment for why this matters).
 	exportID := r.state.AllocateID(uid)
-
 	cfg := RenderExportConfig(exportID, mountPath, uid)
-	// Ganesha's DBus AddExport takes a path to a config *file*, not inline
-	// config text. Write the export block under <ExportRoot>/<uid>.conf so
-	// both the reactor and ganesha containers can see it on the shared
-	// emptyDir. Make sure ExportRoot exists first — it normally does (mount
-	// created it), but during unit tests the fake MountClient doesn't.
+	// AddExport needs a config file path, not inline text. Write alongside
+	// the mountpoint so ganesha (same emptyDir) can read it.
 	cfgPath := filepath.Join(r.opts.ExportRoot, uid+".conf")
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
 		return reconcile.Result{}, fmt.Errorf("mkdir ExportRoot: %w", err)
@@ -223,12 +192,9 @@ func (r *Reactor) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
 		return reconcile.Result{}, fmt.Errorf("write ganesha export config: %w", err)
 	}
-	// Ganesha v6.5 has a bug where calling RemoveExport on an unknown
-	// export id corrupts internal state and makes the next AddExport
-	// segfault the daemon. So we DO NOT pre-remove. Instead AddExport's
-	// error handler tolerates 'already added' / 'duplicate' replies, so
-	// re-running on restart is safe as long as the existing export
-	// really is the one we want.
+	// Don't pre-RemoveExport: Ganesha v6.5 segfaults if you remove an
+	// unknown id, and AddExport already tolerates "already added" replies.
+	// See https://github.com/nfs-ganesha/nfs-ganesha/issues/166.
 	if err := r.ganesha.AddExport(exportID, cfgPath, cfg); err != nil {
 		return reconcile.Result{}, fmt.Errorf("ganesha AddExport: %w", err)
 	}
@@ -256,9 +222,8 @@ func (r *Reactor) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	return reconcile.Result{}, nil
 }
 
-// ensureAbsent removes the EndpointSlice, unmounts, rmdirs, and clears state
-// for a previously-served entry. Best-effort on each step: an error in one
-// sub-step is returned but we still try the rest so a retry can converge.
+// ensureAbsent is best-effort: on any sub-step failure we still attempt
+// the rest so a subsequent retry can converge.
 func (r *Reactor) ensureAbsent(ctx context.Context, prior *Served) error {
 	var firstErr error
 	if prior.ExportID != 0 {
@@ -270,8 +235,7 @@ func (r *Reactor) ensureAbsent(ctx context.Context, prior *Served) error {
 		if err := r.mounts.Unmount(prior.MountPath); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		if err := os.Remove(prior.MountPath); err != nil && !os.IsNotExist(err) && firstErr == nil {
-			// Not fatal — empty dir removal is nice-to-have.
+		if err := os.Remove(prior.MountPath); err != nil && !os.IsNotExist(err) {
 			log.WithError(err).WithField("path", prior.MountPath).Debug("nfsreactor: rmdir failed")
 		}
 	}
@@ -284,11 +248,9 @@ func (r *Reactor) ensureAbsent(ctx context.Context, prior *Served) error {
 	return firstErr
 }
 
-// isLocallyReady returns true iff the LV has a replica config entry for our
-// node and the overall LV is in VolumeStateReady. HwameiStor exposes
-// per-replica state only on LocalVolumeReplica CRs; the LV config's
-// VolumeReplica struct has no state field (verified against
-// pkg/apis/hwameistor/v1alpha1/localvolume_types.go).
+// isLocallyReady: a replica exists on this node AND the overall LV is
+// Ready. Per-replica state lives on LocalVolumeReplica, not on the LV's
+// embedded VolumeReplica entries.
 func (r *Reactor) isLocallyReady(lv *apisv1alpha1.LocalVolume) bool {
 	if lv.Spec.Config == nil {
 		return false
@@ -296,16 +258,12 @@ func (r *Reactor) isLocallyReady(lv *apisv1alpha1.LocalVolume) bool {
 	if !lv.Spec.Config.ExistReplicaOnNode(r.opts.NodeName) {
 		return false
 	}
-	// LV.Status.State tracks the whole volume; require Ready to avoid
-	// trying to mount a half-constructed replica.
 	return lv.Status.State == apisv1alpha1.VolumeStateReady
 }
 
-// resolveDevicePath returns the absolute /dev/<pool>/<lv> path for the
-// replica on this node. Preferred source is the LocalVolumeReplica's
-// Status.DevicePath (already canonical, e.g. /dev/LocalStorage_PoolHDD/pvc-xxx).
-// If the per-replica CR hasn't populated it yet, we fall back to building
-// it from the LV's PoolName + name.
+// resolveDevicePath returns the /dev path of this node's replica.
+// Falls back to /dev/<PoolName>/<LV-name> if the LocalVolumeReplica CR
+// hasn't published the canonical path yet.
 func (r *Reactor) resolveDevicePath(ctx context.Context, lv *apisv1alpha1.LocalVolume) (string, error) {
 	lvrs := &apisv1alpha1.LocalVolumeReplicaList{}
 	if err := r.opts.Client.List(ctx, lvrs); err != nil {
@@ -313,10 +271,7 @@ func (r *Reactor) resolveDevicePath(ctx context.Context, lv *apisv1alpha1.LocalV
 	}
 	for i := range lvrs.Items {
 		lvr := &lvrs.Items[i]
-		if lvr.Spec.VolumeName != lv.Name {
-			continue
-		}
-		if lvr.Spec.NodeName != r.opts.NodeName {
+		if lvr.Spec.VolumeName != lv.Name || lvr.Spec.NodeName != r.opts.NodeName {
 			continue
 		}
 		if lvr.Status.DevicePath != "" {
@@ -326,18 +281,12 @@ func (r *Reactor) resolveDevicePath(ctx context.Context, lv *apisv1alpha1.LocalV
 			return lvr.Status.StoragePath, nil
 		}
 	}
-	// Fallback: /dev/<PoolName>/<LV-name>. This matches the format used by
-	// HwameiStor's LVM executor (see executor_lvm.go).
 	if lv.Spec.PoolName == "" {
-		return "", fmt.Errorf("no replica device path available for LV %s and Spec.PoolName is empty", lv.Name)
+		return "", fmt.Errorf("no replica device path available for LV %s", lv.Name)
 	}
 	return filepath.ToSlash(filepath.Join("/dev", lv.Spec.PoolName, lv.Name)), nil
 }
 
-// serviceNameFor returns the tenant Service name that fronts this LV's NFS
-// exports. HwameiStor records the backing PVC name on the LV spec; the
-// external controller that creates the RWX Service uses the same name so
-// EndpointSlices can bind by label selector.
 func serviceNameFor(lv *apisv1alpha1.LocalVolume) string {
 	return lv.Spec.PersistentVolumeClaimName
 }

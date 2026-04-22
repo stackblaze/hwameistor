@@ -1,11 +1,6 @@
-// Command local-storage-nfs-reactor runs a per-node agent that watches
-// LocalVolume CRs annotated for NFS (RWX) export, mounts the backing LVM
-// device, instructs a co-located NFS-Ganesha daemon to export it via DBus,
-// and maintains an EndpointSlice pointing at this pod for the tenant Service.
-//
-// Designed to run as a DaemonSet sidecar beside NFS-Ganesha on every storage
-// node. Reconciliation is idempotent and safe to restart: state is
-// reconstructed from /proc/mounts and the LocalVolume CRs at boot.
+// Command local-storage-nfs-reactor is the DaemonSet-side agent that
+// bridges HwameiStor LocalVolumes and a co-located NFS-Ganesha daemon.
+// See pkg/local-storage/member/node/nfsreactor for details.
 package main
 
 import (

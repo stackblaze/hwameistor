@@ -1,3 +1,8 @@
+// Package rwxpvc reconciles user-facing RWX PersistentVolumeClaims
+// provisioned by lvm.hwameistor.io/rwx into an NFS-exposed HwameiStor
+// chain: backing RWO PVC → selector-less Service → mirror NFS PV.
+// The node-side nfs-reactor picks up the chain via an annotation on the
+// LocalVolume and serves it through Ganesha.
 package rwxpvc
 
 import (
@@ -23,52 +28,24 @@ import (
 )
 
 const (
-	// RWXProvisionerName is the StorageClass provisioner that marks a PVC
-	// as belonging to this controller.
-	RWXProvisionerName = "lvm.hwameistor.io/rwx"
-	// RWXBackingStorageClassParam is the SC parameter naming the RWO
-	// HwameiStor storage class that will back the RWX volume.
+	RWXProvisionerName          = "lvm.hwameistor.io/rwx"
 	RWXBackingStorageClassParam = "lvm.hwameistor.io/backing-storage-class"
-	// RWXSquashParam is the optional SC parameter controlling the NFS
-	// squash mount option (e.g. "all_squash", "no_root_squash").
-	RWXSquashParam = "lvm.hwameistor.io/nfs-squash"
-	// RWXFinalizer is the finalizer added to the user PVC so we can clean
-	// up the backing chain before the PVC is fully deleted.
-	RWXFinalizer = "hwameistor.io/rwx-pvc"
-	// RWXExportAnnotation tells the node-side reactor which user PVC a
-	// given LocalVolume is exporting over NFS.
-	RWXExportAnnotation = "hwameistor.io/rwx-export"
-	// NFSCSIDriver is the csi.k8s.io driver name for the NFS CSI driver.
-	NFSCSIDriver = "nfs.csi.k8s.io"
-	// BackingPVCSuffix is appended to the user PVC name to form the name
-	// of the backing RWO PVC.
-	BackingPVCSuffix = "-rwx-backing"
-	// MirrorPVPrefix is prepended to the user PVC UID to form the name of
-	// the mirror NFS PV.
-	MirrorPVPrefix = "hwameistor-rwx-"
-	// ExportPathPrefix is the on-node directory under which per-volume
-	// export paths are created.
-	ExportPathPrefix = "/srv/exports/"
+	RWXSquashParam              = "lvm.hwameistor.io/nfs-squash"
+	RWXFinalizer                = "hwameistor.io/rwx-pvc"
+	RWXExportAnnotation         = "hwameistor.io/rwx-export"
+	NFSCSIDriver                = "nfs.csi.k8s.io"
+	BackingPVCSuffix            = "-rwx-backing"
+	MirrorPVPrefix              = "hwameistor-rwx-"
+	ExportPathPrefix            = "/srv/exports/"
 
-	// requeueAfterBacking is how long we wait before re-checking whether
-	// the backing PVC has become Bound so we can annotate its LocalVolume.
 	requeueAfterBacking = 5 * time.Second
 )
 
-// Reconciler reconciles user-facing RWX PersistentVolumeClaims provisioned
-// by lvm.hwameistor.io/rwx into an NFS-exposed HwameiStor chain.
 type Reconciler struct {
 	Client client.Client
-	// Scheme is not currently used for OwnerReferences (cross-namespace
-	// and cluster/namespace-scope boundaries make that awkward) but
-	// downstream helpers may want it, so we keep it on the struct.
 	Scheme *runtime.Scheme
 }
 
-// SetupWithManager wires the reconciler into the manager, watching
-// PersistentVolumeClaims only. We intentionally do not watch the backing
-// resources: they are deterministic from the user PVC so an owner reference
-// or periodic resync would just produce duplicate work.
 func (r *Reconciler) SetupWithManager(mgr manager.Manager) error {
 	c, err := controller.New("rwxpvc-controller", mgr, controller.Options{Reconciler: r})
 	if err != nil {
@@ -77,7 +54,6 @@ func (r *Reconciler) SetupWithManager(mgr manager.Manager) error {
 	return c.Watch(&source.Kind{Type: &corev1.PersistentVolumeClaim{}}, &handler.EnqueueRequestForObject{})
 }
 
-// Reconcile implements reconcile.Reconciler.
 func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	logger := log.WithField("pvc", req.NamespacedName.String())
 
@@ -94,8 +70,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{}, err
 	}
 	if !match {
-		// Not ours. If we somehow left a finalizer on a non-matching PVC
-		// (e.g. SC changed out from under us), still clean it up.
+		// Drop a stale finalizer if the SC was changed out from under us.
 		if containsFinalizer(pvc, RWXFinalizer) && pvc.DeletionTimestamp == nil {
 			return reconcile.Result{}, r.removeFinalizer(ctx, pvc)
 		}
@@ -123,35 +98,27 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	if err := r.ensureBackingPVC(ctx, cfg); err != nil {
 		return reconcile.Result{}, fmt.Errorf("ensure backing PVC: %w", err)
 	}
-
 	svc, err := r.ensureService(ctx, cfg)
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("ensure service: %w", err)
 	}
-
 	if svc.Spec.ClusterIP == "" {
-		// Service hasn't been assigned a ClusterIP yet. Requeue rather
-		// than build a PV with an empty server address.
 		return reconcile.Result{RequeueAfter: requeueAfterBacking}, nil
 	}
-
 	if err := r.ensureMirrorPV(ctx, cfg, svc); err != nil {
 		return reconcile.Result{}, fmt.Errorf("ensure mirror PV: %w", err)
 	}
-
 	if requeue, err := r.annotateLocalVolume(ctx, cfg); err != nil {
 		return reconcile.Result{}, err
 	} else if requeue {
 		return reconcile.Result{RequeueAfter: requeueAfterBacking}, nil
 	}
-
 	return reconcile.Result{}, nil
 }
 
-// isRWXPVC decides whether this PVC belongs to us. Both conditions must
-// hold: the SC's provisioner must be ours, and the PVC must actually
-// request RWX — otherwise a misconfigured RWO PVC would end up behind an
-// NFS proxy for no reason.
+// isRWXPVC: the SC's provisioner must be ours AND the PVC must actually
+// request RWX, else a misconfigured RWO PVC would end up behind an NFS
+// proxy for no reason.
 func (r *Reconciler) isRWXPVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim) (bool, *storagev1.StorageClass, error) {
 	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName == "" {
 		return false, nil, nil
@@ -166,7 +133,6 @@ func (r *Reconciler) isRWXPVC(ctx context.Context, pvc *corev1.PersistentVolumeC
 	if !rwx {
 		return false, nil, nil
 	}
-
 	sc := &storagev1.StorageClass{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Name: *pvc.Spec.StorageClassName}, sc); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -199,17 +165,11 @@ func (r *Reconciler) buildConfig(pvc *corev1.PersistentVolumeClaim, sc *storagev
 	}, nil
 }
 
-// ensureBackingPVC creates the backing RWO PVC if it does not exist, and
-// only grows the capacity on update. We never shrink — that would be
-// unsafe — and we never change the storage class once bound.
-//
-// HwameiStor's CSI CreateVolume needs a topology hint ("accessibility
-// requirements") which the external-provisioner only supplies once the
-// scheduler has picked a node — that normally happens via
-// WaitForFirstConsumer. But no user pod ever consumes the backing PVC
-// directly (the NFS PV does), so WaitForFirstConsumer would deadlock.
-// We break the cycle by stamping volume.kubernetes.io/selected-node
-// ourselves at creation time, picking any Ready LocalStorageNode.
+// ensureBackingPVC creates the RWO backing PVC with a selected-node
+// annotation. HwameiStor's CSI CreateVolume requires a topology hint,
+// which normally comes from WaitForFirstConsumer — but no user pod ever
+// consumes the backing PVC directly (the NFS PV does), so WFFC would
+// deadlock. We pick any Ready LocalStorageNode ourselves.
 func (r *Reconciler) ensureBackingPVC(ctx context.Context, cfg rwxConfig) error {
 	desired := BuildBackingPVC(cfg)
 
@@ -232,9 +192,8 @@ func (r *Reconciler) ensureBackingPVC(ctx context.Context, cfg rwxConfig) error 
 		return err
 	}
 
-	// Existing PVC: if it's still Pending and missing the selected-node
-	// hint (older reconciler, or a user-created PVC), stamp it now so
-	// provisioning can proceed.
+	// Still Pending with no hint (older reconciler or user-created PVC):
+	// stamp it now so provisioning can proceed.
 	if existing.Status.Phase != corev1.ClaimBound &&
 		existing.Annotations["volume.kubernetes.io/selected-node"] == "" {
 		node, perr := r.pickStorageNode(ctx)
@@ -265,9 +224,8 @@ func (r *Reconciler) ensureBackingPVC(ctx context.Context, cfg rwxConfig) error 
 	return nil
 }
 
-// pickStorageNode returns the name of any LocalStorageNode currently in
-// a Ready state. Deterministically picks the lexicographically-first node
-// so repeated calls stay stable when multiple are eligible.
+// pickStorageNode returns the lex-first Ready LocalStorageNode so repeated
+// calls are stable.
 func (r *Reconciler) pickStorageNode(ctx context.Context) (string, error) {
 	list := &apisv1alpha1.LocalStorageNodeList{}
 	if err := r.Client.List(ctx, list); err != nil {
@@ -286,10 +244,6 @@ func (r *Reconciler) pickStorageNode(ctx context.Context) (string, error) {
 	return best, nil
 }
 
-// ensureService creates the Service if it doesn't exist and returns the
-// up-to-date Service (including any ClusterIP assigned by the apiserver).
-// We never mutate an existing Service because its selector/ports matter to
-// the external reactor and should only change out-of-band.
 func (r *Reconciler) ensureService(ctx context.Context, cfg rwxConfig) (*corev1.Service, error) {
 	desired := BuildService(cfg)
 
@@ -299,7 +253,6 @@ func (r *Reconciler) ensureService(ctx context.Context, cfg rwxConfig) (*corev1.
 		if err := r.Client.Create(ctx, desired); err != nil {
 			return nil, err
 		}
-		// Re-read to pick up a cluster-assigned ClusterIP.
 		if err := r.Client.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, existing); err != nil {
 			return nil, err
 		}
@@ -311,9 +264,8 @@ func (r *Reconciler) ensureService(ctx context.Context, cfg rwxConfig) (*corev1.
 	return existing, nil
 }
 
-// ensureMirrorPV creates the NFS PV if missing, and grows its capacity if
-// the user expanded their RWX PVC. We intentionally do not mutate the
-// CSI source or ClaimRef of an existing PV — that would break binding.
+// ensureMirrorPV never mutates the CSI source or ClaimRef of an existing
+// PV — that would break binding.
 func (r *Reconciler) ensureMirrorPV(ctx context.Context, cfg rwxConfig, svc *corev1.Service) error {
 	desired := BuildMirrorPV(cfg, svc)
 
@@ -338,15 +290,12 @@ func (r *Reconciler) ensureMirrorPV(ctx context.Context, cfg rwxConfig, svc *cor
 	return nil
 }
 
-// annotateLocalVolume finds the LocalVolume that backs the RWO PVC and
-// stamps the rwx-export annotation on it. Returns (requeue, err). A
-// requeue result means "not an error, just not ready yet".
-//
-// The LocalVolume's name is the same as the PV name produced by the CSI
-// driver (see genLocalVolumeFromRequest in pkg/local-storage/member/csi),
-// so we look up the backing PVC -> its PV name -> the LocalVolume with
-// that name. As a fallback (e.g. if the naming contract ever changes),
-// we also try listing LocalVolumes by PVC reference.
+// annotateLocalVolume stamps the rwx-export annotation on the LV that
+// backs the RWO PVC. The LV's name is the same as the PV name produced
+// by the CSI driver (see genLocalVolumeFromRequest in
+// pkg/local-storage/member/csi); we fall back to a PVC-ref scan if that
+// naming contract ever drifts. Returns (requeue, err); requeue means
+// "not an error, just not ready yet".
 func (r *Reconciler) annotateLocalVolume(ctx context.Context, cfg rwxConfig) (bool, error) {
 	backing := &corev1.PersistentVolumeClaim{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Name: BackingPVCName(cfg.UserPVCName), Namespace: cfg.UserPVCNamespace}, backing); err != nil {
@@ -356,15 +305,12 @@ func (r *Reconciler) annotateLocalVolume(ctx context.Context, cfg rwxConfig) (bo
 		return false, err
 	}
 	if backing.Spec.VolumeName == "" {
-		// Not bound yet; caller should requeue.
 		return true, nil
 	}
 
 	lv := &apisv1alpha1.LocalVolume{}
 	getErr := r.Client.Get(ctx, types.NamespacedName{Name: backing.Spec.VolumeName}, lv)
 	if apierrors.IsNotFound(getErr) {
-		// Fallback: scan by PVC reference. This is best-effort and only
-		// matters if the naming convention has drifted.
 		list := &apisv1alpha1.LocalVolumeList{}
 		if err := r.Client.List(ctx, list); err != nil {
 			return false, err
@@ -379,7 +325,6 @@ func (r *Reconciler) annotateLocalVolume(ctx context.Context, cfg rwxConfig) (bo
 			}
 		}
 		if found == nil {
-			// Not observable yet; benign — requeue.
 			return true, nil
 		}
 		lv = found
@@ -398,46 +343,25 @@ func (r *Reconciler) annotateLocalVolume(ctx context.Context, cfg rwxConfig) (bo
 	return false, r.Client.Update(ctx, patched)
 }
 
-// reconcileDelete tears down the backing chain in reverse order: PV first
-// (so no client can bind or stay bound after we delete the Service/PVC),
-// then Service, then backing PVC (which triggers normal HwameiStor
-// teardown of the LocalVolume), and finally the finalizer.
+// reconcileDelete tears down in reverse order: mirror PV → Service →
+// backing PVC (triggers HwameiStor teardown of the LocalVolume) →
+// finalizer.
 func (r *Reconciler) reconcileDelete(ctx context.Context, pvc *corev1.PersistentVolumeClaim) (reconcile.Result, error) {
 	if !containsFinalizer(pvc, RWXFinalizer) {
 		return reconcile.Result{}, nil
 	}
-
-	// 1. mirror PV
-	pv := &corev1.PersistentVolume{
-		ObjectMeta: metav1.ObjectMeta{Name: MirrorPVName(pvc.UID)},
-	}
+	pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: MirrorPVName(pvc.UID)}}
 	if err := r.Client.Delete(ctx, pv); err != nil && !apierrors.IsNotFound(err) {
 		return reconcile.Result{}, err
 	}
-
-	// 2. Service
-	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ServiceName(pvc.Name),
-			Namespace: pvc.Namespace,
-		},
-	}
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: ServiceName(pvc.Name), Namespace: pvc.Namespace}}
 	if err := r.Client.Delete(ctx, svc); err != nil && !apierrors.IsNotFound(err) {
 		return reconcile.Result{}, err
 	}
-
-	// 3. backing PVC
-	backing := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      BackingPVCName(pvc.Name),
-			Namespace: pvc.Namespace,
-		},
-	}
+	backing := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: BackingPVCName(pvc.Name), Namespace: pvc.Namespace}}
 	if err := r.Client.Delete(ctx, backing); err != nil && !apierrors.IsNotFound(err) {
 		return reconcile.Result{}, err
 	}
-
-	// 4. drop finalizer
 	return reconcile.Result{}, r.removeFinalizer(ctx, pvc)
 }
 

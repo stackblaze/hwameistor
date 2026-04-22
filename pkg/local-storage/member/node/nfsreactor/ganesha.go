@@ -174,6 +174,11 @@ func isAlreadyAddedError(err error) bool {
 		return true
 	case strings.Contains(msg, "already exists"):
 		return true
+	case strings.Contains(msg, "already active"):
+		// Ganesha's answer when AddExport selects an EXPORT that's
+		// already registered under the same id: "Selected entries in
+		// <path>.conf already active!!!" — exactly what we want.
+		return true
 	case strings.Contains(msg, "invalid param value"):
 		// Ganesha wraps the specific cause in generic text; fall through
 		// and reconcile again — worst case we retry.

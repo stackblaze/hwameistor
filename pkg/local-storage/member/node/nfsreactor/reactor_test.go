@@ -109,6 +109,32 @@ func (f *fakeSlices) liveCount() int {
 	return len(f.alive)
 }
 
+// fakeDRBD: every resource is Primary unless explicitly added to
+// secondary[]; non-HA tests don't touch it since isLocallyReady
+// short-circuits on Convertible==false.
+type fakeDRBD struct {
+	mu        sync.Mutex
+	secondary map[string]bool
+	err       error
+}
+
+func newFakeDRBD() *fakeDRBD { return &fakeDRBD{secondary: map[string]bool{}} }
+
+func (f *fakeDRBD) IsPrimary(resource string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return false, f.err
+	}
+	return !f.secondary[resource], nil
+}
+
+func (f *fakeDRBD) setSecondary(resource string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.secondary[resource] = true
+}
+
 // --- helpers ---
 
 const (
@@ -179,11 +205,11 @@ func makeLVR() *apisv1alpha1.LocalVolumeReplica {
 	}
 }
 
-func buildReactor(t *testing.T, objs ...client.Object) (*Reactor, *fakeMount, *fakeGanesha, *fakeSlices) {
+func buildReactor(t *testing.T, objs ...client.Object) (*Reactor, *fakeMount, *fakeGanesha, *fakeSlices, *fakeDRBD) {
 	t.Helper()
 	scheme := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-	fm, fg, fs := newFakeMount(), newFakeGanesha(), newFakeSlices()
+	fm, fg, fs, fd := newFakeMount(), newFakeGanesha(), newFakeSlices(), newFakeDRBD()
 	// ExportRoot must be a writable dir — the reactor writes per-export
 	// Ganesha config files there. Using t.TempDir keeps tests hermetic and
 	// cross-platform.
@@ -193,8 +219,8 @@ func buildReactor(t *testing.T, objs ...client.Object) (*Reactor, *fakeMount, *f
 		PodIP:        "10.1.2.3",
 		PodNamespace: "hwameistor",
 		ExportRoot:   t.TempDir(),
-	}, fm, fg, fs)
-	return r, fm, fg, fs
+	}, fm, fg, fs, fd)
+	return r, fm, fg, fs, fd
 }
 
 func req() reconcile.Request {
@@ -204,7 +230,7 @@ func req() reconcile.Request {
 // --- tests ---
 
 func TestReconcile_AddsExportWhenEligible(t *testing.T) {
-	r, fm, fg, fs := buildReactor(t, makeLV(true, true, true), makeLVR())
+	r, fm, fg, fs, _ := buildReactor(t, makeLV(true, true, true), makeLVR())
 	if _, err := r.Reconcile(context.Background(), req()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -223,7 +249,7 @@ func TestReconcile_AddsExportWhenEligible(t *testing.T) {
 }
 
 func TestReconcile_NoOpWhenMissingAnnotation(t *testing.T) {
-	r, fm, fg, fs := buildReactor(t, makeLV(false, true, true), makeLVR())
+	r, fm, fg, fs, _ := buildReactor(t, makeLV(false, true, true), makeLVR())
 	if _, err := r.Reconcile(context.Background(), req()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -233,7 +259,7 @@ func TestReconcile_NoOpWhenMissingAnnotation(t *testing.T) {
 }
 
 func TestReconcile_NoOpWhenReplicaOnDifferentNode(t *testing.T) {
-	r, fm, fg, fs := buildReactor(t, makeLV(true, false, true))
+	r, fm, fg, fs, _ := buildReactor(t, makeLV(true, false, true))
 	if _, err := r.Reconcile(context.Background(), req()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -243,7 +269,7 @@ func TestReconcile_NoOpWhenReplicaOnDifferentNode(t *testing.T) {
 }
 
 func TestReconcile_RemovesExportWhenLVDeleted(t *testing.T) {
-	r, fm, fg, fs := buildReactor(t, makeLV(true, true, true), makeLVR())
+	r, fm, fg, fs, _ := buildReactor(t, makeLV(true, true, true), makeLVR())
 	ctx := context.Background()
 	if _, err := r.Reconcile(ctx, req()); err != nil {
 		t.Fatalf("first reconcile: %v", err)
@@ -268,7 +294,7 @@ func TestReconcile_RemovesExportWhenLVDeleted(t *testing.T) {
 }
 
 func TestReconcile_Idempotent(t *testing.T) {
-	r, fm, fg, fs := buildReactor(t, makeLV(true, true, true), makeLVR())
+	r, fm, fg, fs, _ := buildReactor(t, makeLV(true, true, true), makeLVR())
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
 		if _, err := r.Reconcile(ctx, req()); err != nil {
@@ -284,5 +310,105 @@ func TestReconcile_Idempotent(t *testing.T) {
 	// EndpointSlice Put is cheap and may be called each round; that's fine.
 	if fs.liveCount() != 1 {
 		t.Fatalf("want 1 endpointslice, got %d", fs.liveCount())
+	}
+}
+
+// --- v2 (HA / convertible) tests ---
+
+// makeHALV builds an eligible-by-spec convertible LV with a local replica.
+// DRBD role is decided by the fakeDRBD, so different tests can flip it.
+func makeHALV() *apisv1alpha1.LocalVolume {
+	lv := makeLV(true, true, true)
+	lv.Spec.Convertible = true
+	return lv
+}
+
+func TestReconcile_HA_PublishesWhenPrimary(t *testing.T) {
+	// fakeDRBD defaults every resource to Primary → this node serves.
+	r, fm, fg, fs, _ := buildReactor(t, makeHALV(), makeLVR())
+	if _, err := r.Reconcile(context.Background(), req()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if fm.count() != 1 {
+		t.Fatalf("HA Primary should mount: got %d", fm.count())
+	}
+	if fg.liveCount() != 1 {
+		t.Fatalf("HA Primary should AddExport: got %d", fg.liveCount())
+	}
+	if fs.liveCount() != 1 {
+		t.Fatalf("HA Primary should Put EndpointSlice: got %d", fs.liveCount())
+	}
+}
+
+func TestReconcile_HA_SkipsWhenSecondary(t *testing.T) {
+	r, fm, fg, fs, fd := buildReactor(t, makeHALV(), makeLVR())
+	fd.setSecondary(testLV)
+
+	if _, err := r.Reconcile(context.Background(), req()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if fm.count() != 0 {
+		t.Fatalf("HA Secondary must NOT mount: got %d", fm.count())
+	}
+	if fg.liveCount() != 0 {
+		t.Fatalf("HA Secondary must NOT AddExport: got %d", fg.liveCount())
+	}
+	if fs.liveCount() != 0 {
+		t.Fatalf("HA Secondary must NOT write EndpointSlice: got %d", fs.liveCount())
+	}
+}
+
+// Promotion flow: this node reported Secondary, then DRBD auto-promotes
+// (e.g. after the old Primary died). Next reconcile must start serving.
+func TestReconcile_HA_TakesOverOnPromotion(t *testing.T) {
+	r, _, fg, fs, fd := buildReactor(t, makeHALV(), makeLVR())
+	fd.setSecondary(testLV)
+
+	if _, err := r.Reconcile(context.Background(), req()); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	if fg.liveCount() != 0 || fs.liveCount() != 0 {
+		t.Fatalf("pre-promotion should not have served: exports=%d slices=%d", fg.liveCount(), fs.liveCount())
+	}
+
+	// Promotion: fakeDRBD now says Primary. Clear the secondary mark.
+	fd.mu.Lock()
+	fd.secondary = map[string]bool{}
+	fd.mu.Unlock()
+
+	if _, err := r.Reconcile(context.Background(), req()); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if fg.liveCount() != 1 || fs.liveCount() != 1 {
+		t.Fatalf("post-promotion should serve: exports=%d slices=%d", fg.liveCount(), fs.liveCount())
+	}
+}
+
+// Demotion flow: this node was serving as Primary, then DRBD demotes it.
+// Next reconcile must tear down: RemoveExport, unmount, Delete slice.
+func TestReconcile_HA_TearsDownOnDemotion(t *testing.T) {
+	r, fm, fg, fs, fd := buildReactor(t, makeHALV(), makeLVR())
+	ctx := context.Background()
+
+	if _, err := r.Reconcile(ctx, req()); err != nil {
+		t.Fatalf("setup reconcile: %v", err)
+	}
+	if fg.liveCount() != 1 {
+		t.Fatalf("setup: want 1 export, got %d", fg.liveCount())
+	}
+
+	fd.setSecondary(testLV)
+
+	if _, err := r.Reconcile(ctx, req()); err != nil {
+		t.Fatalf("demotion reconcile: %v", err)
+	}
+	if fm.count() != 0 {
+		t.Fatalf("demotion should unmount: got %d mounts", fm.count())
+	}
+	if fg.liveCount() != 0 {
+		t.Fatalf("demotion should RemoveExport: got %d live", fg.liveCount())
+	}
+	if fs.liveCount() != 0 {
+		t.Fatalf("demotion should delete EndpointSlice: got %d", fs.liveCount())
 	}
 }

@@ -208,4 +208,13 @@ rwx:
     backingStorageClassName: hwameistor-storage-lvm
     reclaimPolicy: Delete
     allowVolumeExpansion: true
+  # HA RWX (DRBD-replicated). Opt-in. Requires DRBD kernel module +
+  # drbdsetup on every storage node, and a convertible backing SC.
+  ha:
+    storageClass:
+      enabled: false
+      # Must be a convertible HwameiStor SC (replicaNumber>=2, convertible=true).
+      backingStorageClassName: hwameistor-storage-lvm-hdd-ha
+      reclaimPolicy: Delete
+      allowVolumeExpansion: true
 

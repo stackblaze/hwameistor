@@ -42,6 +42,7 @@ type Reactor struct {
 	mounts  MountClient
 	ganesha GaneshaClient
 	slices  EndpointSliceClient
+	drbd    DRBDClient
 }
 
 func New(opts Options) *Reactor {
@@ -51,12 +52,13 @@ func New(opts Options) *Reactor {
 		mounts:  NewRealMountClient(),
 		ganesha: NewGaneshaDBusClient(opts.DbusAddr),
 		slices:  NewEndpointSliceClient(opts.Client, opts.NodeName, opts.PodIP),
+		drbd:    NewDRBDClient(),
 	}
 }
 
 // NewForTest injects fakes.
-func NewForTest(opts Options, m MountClient, g GaneshaClient, s EndpointSliceClient) *Reactor {
-	return &Reactor{opts: opts, state: NewState(), mounts: m, ganesha: g, slices: s}
+func NewForTest(opts Options, m MountClient, g GaneshaClient, s EndpointSliceClient, d DRBDClient) *Reactor {
+	return &Reactor{opts: opts, state: NewState(), mounts: m, ganesha: g, slices: s, drbd: d}
 }
 
 func (r *Reactor) SetupWithManager(mgr manager.Manager) error {
@@ -140,7 +142,11 @@ func (r *Reactor) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	}
 
 	uid := lv.Annotations[ExportAnnotation]
-	eligible := uid != "" && r.isLocallyReady(lv)
+	ready, err := r.isLocallyReady(lv)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	eligible := uid != "" && ready
 
 	if !eligible {
 		if prior := r.state.GetByLV(lv.Name); prior != nil {
@@ -250,17 +256,34 @@ func (r *Reactor) ensureAbsent(ctx context.Context, prior *Served) error {
 	return firstErr
 }
 
-// isLocallyReady: a replica exists on this node AND the overall LV is
-// Ready. Per-replica state lives on LocalVolumeReplica, not on the LV's
-// embedded VolumeReplica entries.
-func (r *Reactor) isLocallyReady(lv *apisv1alpha1.LocalVolume) bool {
+// isLocallyReady decides whether this node should serve the export for
+// the given LV.
+//
+// For a convertible (HA, DRBD-replicated) LV, both replica nodes satisfy
+// the "replica is on me" predicate but only the DRBD Primary can open
+// the device read-write. Ask DRBD directly — VolumeReplica.Primary in
+// the LV spec is a static scheduling hint, not the live role.
+//
+// For a non-HA LV there's exactly one replica; if it's on me and the LV
+// is Ready, I serve.
+func (r *Reactor) isLocallyReady(lv *apisv1alpha1.LocalVolume) (bool, error) {
+	if lv.Status.State != apisv1alpha1.VolumeStateReady {
+		return false, nil
+	}
 	if lv.Spec.Config == nil {
-		return false
+		return false, nil
 	}
 	if !lv.Spec.Config.ExistReplicaOnNode(r.opts.NodeName) {
-		return false
+		return false, nil
 	}
-	return lv.Status.State == apisv1alpha1.VolumeStateReady
+	if !lv.Spec.Convertible {
+		return true, nil
+	}
+	if r.drbd == nil {
+		// Defensive: a convertible LV but no DRBD client injected.
+		return false, fmt.Errorf("convertible LV %s: reactor has no DRBDClient", lv.Name)
+	}
+	return r.drbd.IsPrimary(lv.Name)
 }
 
 // resolveDevicePath returns the /dev path of this node's replica.

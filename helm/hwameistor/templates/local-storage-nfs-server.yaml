@@ -26,6 +26,13 @@ spec:
       serviceAccountName: hwameistor-nfs-server
       hostPID: false
       hostIPC: false
+      # Share PID namespace so the reactor can SIGHUP ganesha by reading
+      # its pid file. Without this, the pid file written by ganesha is
+      # meaningful only inside ganesha's own namespace, and the reactor —
+      # running in a separate container — would end up signalling itself
+      # (PID 1 in its own namespace), triggering the Go default SIGHUP
+      # handler which terminates the process.
+      shareProcessNamespace: true
       # Same node affinity as the existing local-storage DaemonSet — serve RWX wherever storage lives.
       affinity:
         nodeAffinity:

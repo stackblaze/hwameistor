@@ -28,6 +28,15 @@ func sighupGaneshaReload(pidFile string) error {
 	if err != nil {
 		return fmt.Errorf("parse %s (%q): %w", pidFile, raw, err)
 	}
+	// Guard against signalling ourselves. Without shareProcessNamespace=true
+	// on the pod, ganesha's pid file (written from its own namespace)
+	// contains a PID that's meaningless to us — most often "1", which in
+	// the reactor's own namespace is the reactor itself. SIGHUP to self
+	// hits Go's default handler and terminates the process.
+	if pid <= 1 || pid == os.Getpid() {
+		log.WithField("pid", pid).Warn("ganesha pid file points at self/init; pod likely missing shareProcessNamespace=true — skipping SIGHUP")
+		return nil
+	}
 	if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
 		return fmt.Errorf("sighup pid %d: %w", pid, err)
 	}

@@ -7,9 +7,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -61,6 +63,18 @@ func main() {
 	pflag.Parse()
 	flag.Parse()
 	setupLogging()
+
+	// Ignore SIGHUP. With shareProcessNamespace=true, ganesha reloads on
+	// SIGHUP but the reactor has no reason to react to it — and if a mis-
+	// configured pod ever sends SIGHUP to our own PID, Go's default
+	// handler would terminate us. signal.Notify into a drained channel
+	// installs a no-op handler.
+	sighup := make(chan os.Signal, 1)
+	signal.Notify(sighup, syscall.SIGHUP)
+	go func() {
+		for range sighup {
+		}
+	}()
 
 	log.WithFields(log.Fields{
 		"GitCommit": BUILDVERSION,

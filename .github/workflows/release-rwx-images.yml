@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feat/rwx-v1
+      - feat/rwx-v2-ha
       - main
     paths:
       - 'cmd/**'

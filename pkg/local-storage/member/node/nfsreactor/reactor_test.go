@@ -315,11 +315,16 @@ func TestReconcile_Idempotent(t *testing.T) {
 
 // --- v2 (HA / convertible) tests ---
 
-// makeHALV builds an eligible-by-spec convertible LV with a local replica.
-// DRBD role is decided by the fakeDRBD, so different tests can flip it.
+// makeHALV builds an eligible-by-spec HA (replicaNumber=2) LV with a
+// local replica. DRBD role is decided by fakeDRBD per-test. The peer
+// replica is added at a lex-LATER hostname so testNode is the election
+// winner by default (simplifies bootstrap tests).
 func makeHALV() *apisv1alpha1.LocalVolume {
 	lv := makeLV(true, true, true)
-	lv.Spec.Convertible = true
+	lv.Spec.ReplicaNumber = 2
+	lv.Spec.Config.Replicas = append(lv.Spec.Config.Replicas,
+		apisv1alpha1.VolumeReplica{ID: 2, Hostname: "peer-z", IP: "10.0.0.9"},
+	)
 	return lv
 }
 
@@ -340,8 +345,16 @@ func TestReconcile_HA_PublishesWhenPrimary(t *testing.T) {
 	}
 }
 
-func TestReconcile_HA_SkipsWhenSecondary(t *testing.T) {
-	r, fm, fg, fs, fd := buildReactor(t, makeHALV(), makeLVR())
+func TestReconcile_HA_SkipsWhenSecondaryAndNotElected(t *testing.T) {
+	// testNode is "node-a" (default); give the peer a lex-EARLIER name
+	// so election goes to the peer, not us. Then mark testLV Secondary:
+	// we should truly back off.
+	lv := makeLV(true, true, true)
+	lv.Spec.ReplicaNumber = 2
+	lv.Spec.Config.Replicas = append(lv.Spec.Config.Replicas,
+		apisv1alpha1.VolumeReplica{ID: 2, Hostname: "aaa-peer", IP: "10.0.0.9"},
+	)
+	r, fm, fg, fs, fd := buildReactor(t, lv, makeLVR())
 	fd.setSecondary(testLV)
 
 	if _, err := r.Reconcile(context.Background(), req()); err != nil {
@@ -358,10 +371,39 @@ func TestReconcile_HA_SkipsWhenSecondary(t *testing.T) {
 	}
 }
 
-// Promotion flow: this node reported Secondary, then DRBD auto-promotes
-// (e.g. after the old Primary died). Next reconcile must start serving.
+func TestReconcile_HA_ElectsSelfOnBootstrap(t *testing.T) {
+	// Fresh HA volume: DRBD says Secondary on every node. The lex-first
+	// replica node attempts to mount — DRBD auto-promotes it on open().
+	// testNode="node-a" is lex-first vs "peer-z" (see makeHALV).
+	r, fm, fg, fs, fd := buildReactor(t, makeHALV(), makeLVR())
+	fd.setSecondary(testLV)
+
+	if _, err := r.Reconcile(context.Background(), req()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if fm.count() != 1 {
+		t.Fatalf("bootstrap elector should mount: got %d", fm.count())
+	}
+	if fg.liveCount() != 1 {
+		t.Fatalf("bootstrap elector should AddExport: got %d", fg.liveCount())
+	}
+	if fs.liveCount() != 1 {
+		t.Fatalf("bootstrap elector should Put EndpointSlice: got %d", fs.liveCount())
+	}
+}
+
+// Promotion flow: a peer is election-winner + DRBD Primary, so this
+// node stays Secondary and does nothing. Then DRBD auto-promotes this
+// node (because the peer died and we opened the device). Next reconcile
+// must start serving.
 func TestReconcile_HA_TakesOverOnPromotion(t *testing.T) {
-	r, _, fg, fs, fd := buildReactor(t, makeHALV(), makeLVR())
+	// Make the peer lex-first so this node is NOT the bootstrap elector.
+	lv := makeLV(true, true, true)
+	lv.Spec.ReplicaNumber = 2
+	lv.Spec.Config.Replicas = append(lv.Spec.Config.Replicas,
+		apisv1alpha1.VolumeReplica{ID: 2, Hostname: "aaa-peer", IP: "10.0.0.9"},
+	)
+	r, _, fg, fs, fd := buildReactor(t, lv, makeLVR())
 	fd.setSecondary(testLV)
 
 	if _, err := r.Reconcile(context.Background(), req()); err != nil {
@@ -371,7 +413,7 @@ func TestReconcile_HA_TakesOverOnPromotion(t *testing.T) {
 		t.Fatalf("pre-promotion should not have served: exports=%d slices=%d", fg.liveCount(), fs.liveCount())
 	}
 
-	// Promotion: fakeDRBD now says Primary. Clear the secondary mark.
+	// Peer dies → DRBD auto-promotes us on the next open.
 	fd.mu.Lock()
 	fd.secondary = map[string]bool{}
 	fd.mu.Unlock()
@@ -384,10 +426,16 @@ func TestReconcile_HA_TakesOverOnPromotion(t *testing.T) {
 	}
 }
 
-// Demotion flow: this node was serving as Primary, then DRBD demotes it.
-// Next reconcile must tear down: RemoveExport, unmount, Delete slice.
+// Demotion flow: this node was Primary and serving; the peer becomes
+// Primary (we got demoted). Peer is lex-first so we don't re-elect
+// ourselves after the role flip. Next reconcile must tear down.
 func TestReconcile_HA_TearsDownOnDemotion(t *testing.T) {
-	r, fm, fg, fs, fd := buildReactor(t, makeHALV(), makeLVR())
+	lv := makeLV(true, true, true)
+	lv.Spec.ReplicaNumber = 2
+	lv.Spec.Config.Replicas = append(lv.Spec.Config.Replicas,
+		apisv1alpha1.VolumeReplica{ID: 2, Hostname: "aaa-peer", IP: "10.0.0.9"},
+	)
+	r, fm, fg, fs, fd := buildReactor(t, lv, makeLVR())
 	ctx := context.Background()
 
 	if _, err := r.Reconcile(ctx, req()); err != nil {

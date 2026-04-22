@@ -259,13 +259,19 @@ func (r *Reactor) ensureAbsent(ctx context.Context, prior *Served) error {
 // isLocallyReady decides whether this node should serve the export for
 // the given LV.
 //
-// For a convertible (HA, DRBD-replicated) LV, both replica nodes satisfy
-// the "replica is on me" predicate but only the DRBD Primary can open
-// the device read-write. Ask DRBD directly — VolumeReplica.Primary in
-// the LV spec is a static scheduling hint, not the live role.
+// Single-replica (non-HA): if the replica is on this node and the LV is
+// Ready, we serve.
 //
-// For a non-HA LV there's exactly one replica; if it's on me and the LV
-// is Ready, I serve.
+// Multi-replica (HA, DRBD): we serve iff we're the DRBD Primary. Both
+// nodes satisfy "replica is on me" but only the Primary can open the
+// device r/w. If nobody is Primary yet (fresh volume, never opened),
+// the lex-first replica node elects itself so DRBD has someone to
+// auto-promote. Other nodes will see themselves Secondary on the next
+// reconcile and back off.
+//
+// HwameiStor's LocalVolume.Spec.Config.Replicas[i].Primary field is a
+// static scheduling hint set at creation time — not the live DRBD
+// role — so we ask DRBD directly via drbdsetup.
 func (r *Reactor) isLocallyReady(lv *apisv1alpha1.LocalVolume) (bool, error) {
 	if lv.Status.State != apisv1alpha1.VolumeStateReady {
 		return false, nil
@@ -276,14 +282,38 @@ func (r *Reactor) isLocallyReady(lv *apisv1alpha1.LocalVolume) (bool, error) {
 	if !lv.Spec.Config.ExistReplicaOnNode(r.opts.NodeName) {
 		return false, nil
 	}
-	if !lv.Spec.Convertible {
+	if !lv.IsHighAvailability() {
 		return true, nil
 	}
 	if r.drbd == nil {
-		// Defensive: a convertible LV but no DRBD client injected.
-		return false, fmt.Errorf("convertible LV %s: reactor has no DRBDClient", lv.Name)
+		return false, fmt.Errorf("HA LV %s: reactor has no DRBDClient", lv.Name)
 	}
-	return r.drbd.IsPrimary(lv.Name)
+	primary, err := r.drbd.IsPrimary(lv.Name)
+	if err != nil {
+		return false, err
+	}
+	if primary {
+		return true, nil
+	}
+	// Not Primary yet. If DRBD hasn't promoted anyone, the lex-first
+	// replica node attempts to serve so the mount triggers auto-promote.
+	// Peers will see Secondary on next reconcile.
+	if r.shouldElectSelf(lv) {
+		return true, nil
+	}
+	return false, nil
+}
+
+// shouldElectSelf returns true on the lex-first replica hostname,
+// used only to break the bootstrap tie on a fresh HA volume.
+func (r *Reactor) shouldElectSelf(lv *apisv1alpha1.LocalVolume) bool {
+	first := ""
+	for _, rep := range lv.Spec.Config.Replicas {
+		if first == "" || rep.Hostname < first {
+			first = rep.Hostname
+		}
+	}
+	return first == r.opts.NodeName
 }
 
 // resolveDevicePath returns the /dev path of this node's replica.

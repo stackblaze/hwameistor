@@ -88,6 +88,7 @@ spec:
         - |
           set -e
           mkdir -p /run/dbus \
+                   /var/run/ganesha \
                    /var/lib/nfs/ganesha \
                    /var/log/ganesha \
                    /usr/local/var/run/ganesha

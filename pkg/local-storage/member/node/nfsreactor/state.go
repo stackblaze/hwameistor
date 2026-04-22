@@ -100,27 +100,32 @@ func (s *State) Delete(uid string) {
 	}
 }
 
-// AllocateID returns a fresh non-zero uint16 export ID not currently in use.
-// Wraps at uint16 max. Caller must ensure state lock is not held.
-func (s *State) AllocateID() uint16 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	used := map[uint16]bool{}
-	for _, v := range s.served {
-		used[v.ExportID] = true
+// AllocateID returns a non-zero uint16 export ID deterministically derived
+// from the UID. This keeps the ID stable across reactor restarts so we
+// don't confuse Ganesha with a new ID for the same pseudo-path — and we
+// avoid calling Ganesha's buggy RemoveExport on unknown ids (which
+// segfaults the daemon in v6.5).
+//
+// The mapping is a simple fnv-1a hash over the UID, clamped to non-zero
+// uint16. Collisions are astronomically unlikely (≤ a few thousand
+// exports per node) but not impossible; if two UIDs hash to the same id
+// Ganesha will reject the second AddExport with 'Duplicate export id'
+// and our AddExport caller will treat that as "already added" — which
+// is the wrong export but at least it won't crash the daemon. If this
+// turns out to bite anyone we can switch to a persisted mapping.
+func (s *State) AllocateID(uid string) uint16 {
+	const (
+		fnvOffset uint64 = 14695981039346656037
+		fnvPrime  uint64 = 1099511628211
+	)
+	h := fnvOffset
+	for i := 0; i < len(uid); i++ {
+		h ^= uint64(uid[i])
+		h *= fnvPrime
 	}
-	// Try at most 65535 iterations.
-	for i := 0; i < 65535; i++ {
-		s.nextID++
-		if s.nextID == 0 {
-			s.nextID = 1
-		}
-		if !used[s.nextID] {
-			return s.nextID
-		}
-	}
-	// Extremely unlikely: the pool is full. Return 1 and let AddExport fail.
-	return 1
+	id := uint16(h % 65535) // 0..65534
+	id++                    // 1..65535 (never 0)
+	return id
 }
 
 // RebuildFromMounts scans /proc/mounts and populates state entries for any

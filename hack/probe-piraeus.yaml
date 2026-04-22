@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-piraeus
+  namespace: hwameistor
+spec:
+  restartPolicy: Never
+  containers:
+  - name: probe
+    image: quay.io/piraeusdatastore/piraeus-csi-nfs-server:v1.10.6
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      set +e
+      echo "=== command -v ==="
+      command -v dbus-daemon
+      command -v ganesha.nfsd
+      echo "=== /etc/ganesha ==="
+      ls /etc/ganesha/ 2>&1
+      echo "=== /etc/dbus-1/system.d ==="
+      ls /etc/dbus-1/system.d/ 2>&1
+      echo "=== ganesha dbus conf ==="
+      cat /etc/dbus-1/system.d/org.ganesha.nfsd.conf 2>&1 | head -20
+      echo "=== os-release ==="
+      cat /etc/os-release 2>&1 | head -5
+      sleep 300
+    securityContext:
+      privileged: true

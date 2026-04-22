@@ -205,13 +205,10 @@ func (r *Reactor) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 		return reconcile.Result{}, err
 	}
 
-	// Assign or reuse export ID.
-	exportID := uint16(0)
-	if existing != nil && existing.ExportID != 0 {
-		exportID = existing.ExportID
-	} else {
-		exportID = r.state.AllocateID()
-	}
+	// Assign export ID deterministically from the user PVC UID so the same
+	// export keeps the same id across reactor restarts (see State.AllocateID
+	// comment for why this matters).
+	exportID := r.state.AllocateID(uid)
 
 	cfg := RenderExportConfig(exportID, mountPath, uid)
 	// Ganesha's DBus AddExport takes a path to a config *file*, not inline
@@ -226,15 +223,12 @@ func (r *Reactor) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
 		return reconcile.Result{}, fmt.Errorf("write ganesha export config: %w", err)
 	}
-	// Ganesha rejects AddExport for a pseudo-path/export-id that already
-	// exists. On reactor restart our in-memory state is empty, so the
-	// export can still be registered in Ganesha. Remove first (no-op if
-	// absent), then re-add. RemoveExport errors are informational at this
-	// point — if the export truly isn't there, the subsequent AddExport
-	// is what matters.
-	if err := r.ganesha.RemoveExport(exportID); err != nil {
-		lg.WithError(err).WithField("exportID", exportID).Debug("ganesha RemoveExport (pre-add) returned — likely not present, will add")
-	}
+	// Ganesha v6.5 has a bug where calling RemoveExport on an unknown
+	// export id corrupts internal state and makes the next AddExport
+	// segfault the daemon. So we DO NOT pre-remove. Instead AddExport's
+	// error handler tolerates 'already added' / 'duplicate' replies, so
+	// re-running on restart is safe as long as the existing export
+	// really is the one we want.
 	if err := r.ganesha.AddExport(exportID, cfgPath, cfg); err != nil {
 		return reconcile.Result{}, fmt.Errorf("ganesha AddExport: %w", err)
 	}

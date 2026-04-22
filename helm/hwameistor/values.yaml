@@ -194,8 +194,13 @@ rwx:
     tag: ""
     resources: {}
   ganesha:
-    # Upstream Ganesha image. Same one TopoLVM uses.
-    image: ghcr.io/kubernetes-sigs/nfs-ganesha:V6.5
+    # Piraeus's NFS server image — it bundles a matched ganesha + dbus
+    # stack that works reliably under Kubernetes. The upstream sig-storage
+    # ganesha V6.5 image we tried first has runtime bugs in the DBus
+    # ExportMgr path (segfaults, missing PID 1 init, etc.). We drive it
+    # with our own bash startup script (dbus-daemon + ganesha.nfsd) since
+    # we don't use Piraeus's drbd-reactor.
+    image: quay.io/piraeusdatastore/piraeus-csi-nfs-server:v1.10.6
     resources: {}
   storageClass:
     enabled: true

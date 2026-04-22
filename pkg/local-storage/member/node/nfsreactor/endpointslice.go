@@ -96,7 +96,9 @@ func (r *realSlices) Put(ctx context.Context, serviceName, serviceNamespace stri
 			Namespace: serviceNamespace,
 			Labels: map[string]string{
 				discoveryv1.LabelServiceName: serviceName,
-				discoveryv1.LabelManagedBy:   "hwameistor.io/nfs-reactor",
+				// endpointslice.kubernetes.io/managed-by must be a valid
+				// label value (alphanumeric + '-_.'), no '/'.
+				discoveryv1.LabelManagedBy: "hwameistor-nfs-reactor",
 			},
 		},
 		AddressType: discoveryv1.AddressTypeIPv4,

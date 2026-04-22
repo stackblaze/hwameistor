@@ -145,7 +145,15 @@ spec:
           path: /sys
           type: Directory
       - name: exports
-        emptyDir: {}
+        # hostPath, not emptyDir: the reactor mounts the backing LV at
+        # /srv/exports/<uid>, and those mounts need to survive reactor pod
+        # restarts (otherwise a restart sees EBUSY because the LV is still
+        # mounted in a previous pod's emptyDir tree on the host). A stable
+        # host-visible path also lets ganesha keep serving exports during
+        # reactor restarts.
+        hostPath:
+          path: /var/lib/hwameistor/nfs-exports
+          type: DirectoryOrCreate
       - name: dbus
         emptyDir: {}
       - name: ganesha-config

@@ -1,0 +1,17 @@
+{{- /*
+  HA (DRBD-replicated) RWX StorageClass. Off by default; requires an HA
+  backing SC (convertible=true, replicaNumber>=2) to exist in the
+  cluster and drbd-utils / DRBD kernel module on every storage node.
+*/ -}}
+{{- if and .Values.rwx.enabled .Values.rwx.ha.storageClass.enabled }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: hwameistor-storage-lvm-rwx-ha
+provisioner: lvm.hwameistor.io/rwx
+parameters:
+  lvm.hwameistor.io/backing-storage-class: {{ .Values.rwx.ha.storageClass.backingStorageClassName | quote }}
+reclaimPolicy: {{ .Values.rwx.ha.storageClass.reclaimPolicy }}
+allowVolumeExpansion: {{ .Values.rwx.ha.storageClass.allowVolumeExpansion }}
+volumeBindingMode: Immediate
+{{- end }}

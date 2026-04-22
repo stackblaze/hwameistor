@@ -183,4 +183,38 @@ localDiskActionController:
   tag: ""
   resources: {}
 
+# ReadWriteMany (RWX) support via NFS. Off by default; requires csi-driver-nfs
+# to be installed separately in the cluster (driver name: nfs.csi.k8s.io).
+# See docs/docs/volumes/rwx.md.
+rwx:
+  enabled: false
+  reactor:
+    # Built from cmd/local-storage-nfs-reactor.
+    imageRepository: hwameistor/local-storage-nfs-reactor
+    tag: ""
+    resources: {}
+  ganesha:
+    # Piraeus's NFS server image — it bundles a matched ganesha + dbus
+    # stack that works reliably under Kubernetes. The upstream sig-storage
+    # ganesha V6.5 image we tried first has runtime bugs in the DBus
+    # ExportMgr path (segfaults, missing PID 1 init, etc.). We drive it
+    # with our own bash startup script (dbus-daemon + ganesha.nfsd) since
+    # we don't use Piraeus's drbd-reactor.
+    image: quay.io/piraeusdatastore/piraeus-csi-nfs-server:v1.10.6
+    resources: {}
+  storageClass:
+    enabled: true
+    # The RWO HwameiStor StorageClass that backs each RWX PVC's underlying volume.
+    backingStorageClassName: hwameistor-storage-lvm
+    reclaimPolicy: Delete
+    allowVolumeExpansion: true
+  # HA RWX (DRBD-replicated). Opt-in. Requires DRBD kernel module +
+  # drbdsetup on every storage node, and a convertible backing SC.
+  ha:
+    storageClass:
+      enabled: false
+      # Must be a convertible HwameiStor SC (replicaNumber>=2, convertible=true).
+      backingStorageClassName: hwameistor-storage-lvm-hdd-ha
+      reclaimPolicy: Delete
+      allowVolumeExpansion: true
 

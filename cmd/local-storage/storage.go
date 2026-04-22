@@ -52,6 +52,7 @@ var (
 	migrateDataNeedCheck    = flag.Bool("migrate-check", false, "Enable data verification during data migration")
 	snapshotRestoreTimeout  = flag.Int("snapshot-restore-timeout", 600, "Time to restore VolumeReplica Snapshot，in seconds")
 	pvMetadataSize          = flag.Int("pv-metadata-size", 4*1024*1024, "The size of the metadata of the PV in Bytes, default 4MB")
+	enableRWX               = flag.Bool("enable-rwx", false, "Enable the RWX (ReadWriteMany) reconciler. Requires csi-driver-nfs and the hwameistor-nfs-server DaemonSet in the cluster.")
 )
 
 var BUILDVERSION, BUILDTIME, GOVERSION string
@@ -115,6 +116,7 @@ func main() {
 	localctrl.MigrateConcurrentNumber = *migrateConcurrentNumber
 	localctrl.MigrateDataNeedCheck = *migrateDataNeedCheck
 	member.SnapshotRestoreTimeout = *snapshotRestoreTimeout
+	controller.Enabled = *enableRWX
 
 	systemConfig, err := getSystemConfig()
 	if err != nil {

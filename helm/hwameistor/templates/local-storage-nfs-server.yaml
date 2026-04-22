@@ -1,0 +1,166 @@
+{{- if .Values.rwx.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hwameistor-nfs-server
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: hwameistor-nfs-server
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: hwameistor-nfs-server
+spec:
+  selector:
+    matchLabels:
+      app: hwameistor-nfs-server
+  template:
+    metadata:
+      labels:
+        app: hwameistor-nfs-server
+      annotations:
+        kubectl.kubernetes.io/default-container: nfs-reactor
+    spec:
+      serviceAccountName: hwameistor-nfs-server
+      hostPID: false
+      hostIPC: false
+      # Same node affinity as the existing local-storage DaemonSet — serve RWX wherever storage lives.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: lvm.hwameistor.io/enable
+                operator: NotIn
+                values:
+                  - "false"
+      containers:
+      - name: nfs-reactor
+        image: {{ .Values.global.hwameistorImageRegistry }}/{{ .Values.rwx.reactor.imageRepository }}:{{ template "hwameistor.rwxReactorImageTag" . }}
+        imagePullPolicy: IfNotPresent
+        args:
+        - --nodename=$(MY_NODENAME)
+        - --pod-ip=$(POD_IP)
+        - --pod-namespace=$(POD_NAMESPACE)
+        - --export-root=/srv/exports
+        - --ganesha-pid=/var/run/ganesha/ganesha.pid
+        env:
+        - name: MY_NODENAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        securityContext:
+          # Required for mount(2) and for accessing /dev
+          privileged: true
+        volumeMounts:
+        - name: dev
+          mountPath: /dev
+        - name: sys
+          mountPath: /sys
+          readOnly: true
+        - name: exports
+          mountPath: /srv/exports
+          mountPropagation: Bidirectional
+        - name: ganesha-run
+          mountPath: /var/run/ganesha
+        resources:
+          {{- toYaml .Values.rwx.reactor.resources | nindent 10 }}
+      - name: ganesha
+        image: {{ .Values.rwx.ganesha.image }}
+        imagePullPolicy: IfNotPresent
+        # Upstream nfs-ganesha image has /bin/bash as entrypoint with no
+        # default command — we invoke ganesha.nfsd explicitly. -p writes
+        # the pid file the reactor reads, -F keeps it foregrounded.
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          set -e
+          mkdir -p /var/run/ganesha \
+                   /var/lib/nfs/ganesha \
+                   /var/log/ganesha \
+                   /srv/exports/ganesha.d
+          exec ganesha.nfsd -F -L /dev/stdout \
+                            -f /etc/ganesha/ganesha.conf \
+                            -p /var/run/ganesha/ganesha.pid
+        securityContext:
+          privileged: true
+        ports:
+        - name: nfs
+          containerPort: 2049
+          protocol: TCP
+        volumeMounts:
+        - name: dev
+          mountPath: /dev
+        - name: sys
+          mountPath: /sys
+          readOnly: true
+        - name: exports
+          mountPath: /srv/exports
+          mountPropagation: Bidirectional
+        - name: ganesha-run
+          mountPath: /var/run/ganesha
+        - name: ganesha-config
+          mountPath: /etc/ganesha
+          readOnly: true
+        resources:
+          {{- toYaml .Values.rwx.ganesha.resources | nindent 10 }}
+      volumes:
+      - name: dev
+        hostPath:
+          path: /dev
+          type: Directory
+      - name: sys
+        hostPath:
+          path: /sys
+          type: Directory
+      - name: exports
+        # hostPath, not emptyDir: the reactor mounts the backing LV at
+        # /srv/exports/<uid>, and those mounts need to survive reactor pod
+        # restarts (otherwise EBUSY because the LV is still mounted in a
+        # previous pod's emptyDir tree on the host). A stable host-visible
+        # path also lets ganesha keep serving during reactor restarts.
+        hostPath:
+          path: /var/lib/hwameistor/nfs-exports
+          type: DirectoryOrCreate
+      # ganesha-run is shared only between reactor and ganesha containers
+      # so the reactor can read the pid file to SIGHUP-reload exports.
+      - name: ganesha-run
+        emptyDir: {}
+      - name: ganesha-config
+        configMap:
+          name: hwameistor-nfs-ganesha-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hwameistor-nfs-ganesha-config
+  namespace: {{ .Release.Namespace }}
+data:
+  ganesha.conf: |
+    NFS_Core_Param {
+        NFS_Protocols = 4;
+        Enable_UDP = false;
+        Enable_NLM = false;
+        Enable_RQUOTA = false;
+    }
+    NFSV4 {
+        Grace_Period = 30;
+    }
+    NFS_KRB5 {
+        Active_krb5 = false;
+    }
+    # The nfs-reactor sidecar writes per-export .conf files here and
+    # sends SIGHUP; ganesha re-parses on reload and diffs additions /
+    # removals / updates without dropping live client connections.
+    %dir "/srv/exports/ganesha.d"
+{{- end }}

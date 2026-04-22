@@ -1,0 +1,78 @@
+name: Build & push backup images
+
+on:
+  push:
+    branches:
+      - feat/backup-restic
+      - main
+    paths:
+      - 'cmd/local-storage/**'
+      - 'pkg/**'
+      - 'vendor/**'
+      - 'build/local-storage/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/release-backup-images.yml'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag override (defaults to git short SHA)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    # The backup/restore reconcilers live inside cmd/local-storage, so we
+    # only need to rebuild that single image. No Dockerfile changes needed —
+    # the existing Dockerfile just copies the pre-compiled binary.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Compute image tags
+        id: t
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "sha=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "branch=${GITHUB_REF_NAME//\//-}" >> "$GITHUB_OUTPUT"
+
+      - name: Compile local-storage
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          mkdir -p _build
+          go build -a -mod vendor -installsuffix cgo \
+              -o _build/local-storage ./cmd/local-storage
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: build/local-storage/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/stackblaze/hwameistor-local-storage:${{ steps.t.outputs.sha }}
+            ghcr.io/stackblaze/hwameistor-local-storage:${{ steps.t.outputs.branch }}
+          cache-from: type=gha,scope=local-storage
+          cache-to: type=gha,mode=max,scope=local-storage

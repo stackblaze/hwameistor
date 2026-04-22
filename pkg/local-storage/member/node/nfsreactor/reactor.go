@@ -18,11 +18,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	apisv1alpha1 "github.com/hwameistor/hwameistor/pkg/apis/hwameistor/v1alpha1"
+	"github.com/hwameistor/hwameistor/pkg/local-storage/member/rwx"
 )
 
-// ExportAnnotation on a LocalVolume holds the user PVC UID; non-empty means
-// "serve this LV over NFS".
-const ExportAnnotation = "hwameistor.io/rwx-export"
+// ExportAnnotation re-exports the shared constant so internal call sites
+// here keep working; new code should import pkg/local-storage/member/rwx
+// directly.
+const ExportAnnotation = rwx.ExportAnnotation
 
 type Options struct {
 	Client         client.Client

@@ -25,18 +25,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	apisv1alpha1 "github.com/hwameistor/hwameistor/pkg/apis/hwameistor/v1alpha1"
+	"github.com/hwameistor/hwameistor/pkg/local-storage/member/rwx"
 )
 
 const (
-	RWXProvisionerName          = "lvm.hwameistor.io/rwx"
+	// RWXProvisionerName, RWXExportAnnotation re-exported from rwx.* for
+	// backwards compatibility with callers that imported them directly.
+	RWXProvisionerName  = rwx.ProvisionerName
+	RWXExportAnnotation = rwx.ExportAnnotation
+
 	RWXBackingStorageClassParam = "lvm.hwameistor.io/backing-storage-class"
 	RWXSquashParam              = "lvm.hwameistor.io/nfs-squash"
 	RWXFinalizer                = "hwameistor.io/rwx-pvc"
-	RWXExportAnnotation         = "hwameistor.io/rwx-export"
 	NFSCSIDriver                = "nfs.csi.k8s.io"
 	BackingPVCSuffix            = "-rwx-backing"
 	MirrorPVPrefix              = "hwameistor-rwx-"
-	ExportPathPrefix            = "/srv/exports/"
+	ExportPathPrefix            = rwx.ExportRootDefault + "/"
 
 	requeueAfterBacking = 5 * time.Second
 )
@@ -184,7 +188,7 @@ func (r *Reconciler) ensureBackingPVC(ctx context.Context, cfg rwxConfig) error 
 			if desired.Annotations == nil {
 				desired.Annotations = map[string]string{}
 			}
-			desired.Annotations["volume.kubernetes.io/selected-node"] = node
+			desired.Annotations[rwx.AnnSelectedNode] = node
 		}
 		return r.Client.Create(ctx, desired)
 	}
@@ -195,7 +199,7 @@ func (r *Reconciler) ensureBackingPVC(ctx context.Context, cfg rwxConfig) error 
 	// Still Pending with no hint (older reconciler or user-created PVC):
 	// stamp it now so provisioning can proceed.
 	if existing.Status.Phase != corev1.ClaimBound &&
-		existing.Annotations["volume.kubernetes.io/selected-node"] == "" {
+		existing.Annotations[rwx.AnnSelectedNode] == "" {
 		node, perr := r.pickStorageNode(ctx)
 		if perr != nil {
 			return perr
@@ -205,7 +209,7 @@ func (r *Reconciler) ensureBackingPVC(ctx context.Context, cfg rwxConfig) error 
 			if patch.Annotations == nil {
 				patch.Annotations = map[string]string{}
 			}
-			patch.Annotations["volume.kubernetes.io/selected-node"] = node
+			patch.Annotations[rwx.AnnSelectedNode] = node
 			if err := r.Client.Update(ctx, patch); err != nil {
 				return err
 			}

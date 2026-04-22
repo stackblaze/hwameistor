@@ -20,6 +20,7 @@ import (
 
 	apisv1alpha1 "github.com/hwameistor/hwameistor/pkg/apis/hwameistor/v1alpha1"
 	"github.com/hwameistor/hwameistor/pkg/local-storage/member/node/nfsreactor"
+	"github.com/hwameistor/hwameistor/pkg/local-storage/member/rwx"
 )
 
 var (
@@ -27,7 +28,7 @@ var (
 	podIP          = flag.String("pod-ip", "", "Pod IP for EndpointSlice (required)")
 	podNamespace   = flag.String("pod-namespace", "", "Pod namespace (required)")
 	dbusAddr       = flag.String("ganesha-dbus", "unix:path=/run/dbus/system_bus_socket", "Ganesha DBus system bus socket")
-	exportRoot     = flag.String("export-root", "/srv/exports", "Mount root for NFS exports")
+	exportRoot     = flag.String("export-root", rwx.ExportRootDefault, "Mount root for NFS exports")
 	resyncInterval = flag.Duration("resync", 15*time.Second, "Periodic full resync interval")
 	logLevel       = flag.Int("v", 4, "log verbosity")
 )
